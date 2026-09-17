@@ -385,6 +385,11 @@ def run_doctor_command() -> int:
     return 0
 
 def main() -> None:
+    if "--plain" in sys.argv:
+        sys.argv[:] = [a for a in sys.argv if a != "--plain"]
+        plain_forced = True
+    else:
+        plain_forced = False
     if len(sys.argv) >= 2 and sys.argv[1] == "doctor": run_doctor_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "onboard": run_onboard_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "setup": run_setup_command(); return
@@ -393,7 +398,14 @@ def main() -> None:
     try: agent = build_agent()
     except RuntimeError as err: print(f"Config error: {err}"); print(f"Set api_key in {app_home() / 'config.json'}." ); return
     if len(sys.argv) > 1: print(cli_ask(agent, " ".join(sys.argv[1:]))); return
-    run_chat_loop(agent)
+    if plain_forced or not sys.stdout.isatty():
+        run_plain_loop(agent)
+        return
+    try:
+        run_tui_loop(agent)
+    except Exception as err:
+        print(f"TUI unavailable ({err}), falling back to plain mode.")
+        run_plain_loop(agent)
 
 
 def _version() -> str:
@@ -404,7 +416,49 @@ def _version() -> str:
         return "dev"
 
 
-def run_chat_loop(agent: Agent) -> None:
+def handle_local(agent: Agent, cmd: str, args: str):
+    """Local slash commands. Returns response text, or None for normal chat."""
+    if cmd in {"help", "?"}: return _cli_help()
+    if cmd == "new": return agent.reset()
+    if cmd == "retry": return cli_resolve(agent, agent.retry())
+    if cmd == "undo": return agent.undo()
+    if cmd == "compress": return agent.compress()
+    if cmd == "usage": return agent.usage()
+    if cmd == "memory": return cli_memory(agent, "/memory" + (f" {args}" if args else ""))
+    if cmd == "skills": return cli_skills(agent, "/skills" + (f" {args}" if args else ""))
+    if cmd == "model": return agent.set_model(args)
+    if cmd == "approve":
+        return agent.approve(args.split()[0]) if args else "Usage: /approve <id>"
+    if cmd == "deny":
+        return agent.deny(args.split()[0]) if args else "Usage: /deny <id>"
+    if cmd == "answer":
+        pid, _, ans = args.partition(" ")
+        return agent.answer_clarify(pid, ans) if pid and ans else "Usage: /answer <id> <text>"
+    return None
+
+
+def pending_card(agent: Agent, out: str) -> str | None:
+    """Render a ⟪PENDING⟫ marker as TUI/plain text. None when no marker."""
+    from owibot.agent.tools import parse_pending_marker
+    pid = parse_pending_marker(out)
+    if not pid:
+        return None
+    trailing = out.split("⟫", 1)[1].strip() if "⟫" in out else ""
+    entry = agent.pending.get(pid)
+    if entry is None:
+        return "That request already expired."
+    op = entry["op"]
+    if op.get("kind") == "clarify":
+        lines = [f"? {op.get('question', '')}  [{pid}]"]
+        for i, opt in enumerate(op.get("options") or [], start=1):
+            lines.append(f"  {i}. {opt}")
+        lines.append(f"Reply: /answer {pid} <number or text>")
+        return "\n".join(lines)
+    return (f"Approval [{pid}]: {trailing or 'confirmation needed'}\n"
+            f"/approve {pid}   or   /deny {pid}")
+
+
+def run_plain_loop(agent: Agent) -> None:
     from .theme import Spinner, accent, banner, dim, footer, reply_block
     from .theme import _uni
     if sys.stdout.isatty(): _clear_screen()
@@ -427,23 +481,98 @@ def run_chat_loop(agent: Agent) -> None:
         except KeyboardInterrupt: print(); break
         if not text: continue
         if text.lower() in {"exit", "quit"}: break
-        if text in {"/help", "help"}: print(_cli_help()); continue
-        if text == "/new": print(agent.reset()); continue
-        if text == "/retry":
-            with Spinner(): out = agent.retry()
-            print(reply_block(cli_resolve(agent, out))); continue
-        if text == "/undo": print(agent.undo()); continue
-        if text == "/compress": print(agent.compress()); continue
-        if text == "/usage": print(agent.usage()); continue
-        if text == "/memory" or text.startswith("/memory "): print(cli_memory(agent, text)); continue
-        if text == "/skills" or text.startswith("/skills "): print(cli_skills(agent, text)); continue
-        if text == "/model" or text.startswith("/model "): print(agent.set_model(text[6:].strip())); continue
+        from .tui import parse_local
+        cmd, args = parse_local(text)
+        if cmd == "learn":
+            name, _, material = args.partition("|")
+            if not name.strip() or not material.strip():
+                print("Usage: /learn <name> | <workflow, URL, or 'how I just ...'>"); continue
+            before = agent.session_tool_calls
+            with Spinner():
+                out = cli_ask(agent, Agent.learn_prompt(name.strip(), material.strip()))
+            used = agent.session_tool_calls - before
+            print(reply_block(out))
+            print(footer(used, len(agent.recent) // 2, agent.memory.usage("memory"))); continue
+        if cmd:
+            local = handle_local(agent, cmd, args)
+            if local is None:
+                print(f"unknown command /{cmd} — try /help"); continue
+            card = pending_card(agent, local)
+            print(reply_block(card or local)); continue
         before = agent.session_tool_calls
         with Spinner():
             out = cli_ask(agent, text)
         used = agent.session_tool_calls - before
         print(reply_block(out))
         print(footer(used, len(agent.recent) // 2, agent.memory.usage("memory")))
+
+
+def run_tui_loop(agent: Agent) -> None:
+    from .theme import Spinner
+    from .tui import MessageStore, build_app, parse_local, status_line
+    store = MessageStore()
+    store.add("sys", "OwiBot console — /help for commands, Ctrl+C to quit.")
+    busy = {"on": False}
+
+    def frags():
+        st = agent.memory.stats(agent.chat_id)
+        return status_line(agent.llm.model, len(agent.recent) // 2,
+                           agent.session_tool_calls, st["memory"], busy["on"])
+
+    while True:
+        try:
+            app = build_app(store, frags, str(app_home() / "cli_history"))
+            text = (app.run() or "").strip()
+        except Exception as err:
+            print(f"TUI unavailable ({err}), falling back to plain mode.")
+            return run_plain_loop(agent)
+        if text in {"/__quit__"} or text.lower() in {"exit", "quit"}:
+            break
+        if not text:
+            continue
+        cmd, args = parse_local(text)
+        if cmd == "learn":
+            name, _, material = args.partition("|")
+            if not name.strip() or not material.strip():
+                store.add("sys", "Usage: /learn <name> | <workflow, URL, or 'how I just ...'>")
+                continue
+            store.add("user", text)
+            busy["on"] = True
+            try:
+                with Spinner():
+                    out = agent.ask(Agent.learn_prompt(name.strip(), material.strip()),
+                                    {"chat_id": agent.chat_id})
+            except Exception as err:
+                out = f"Error: {err}"
+            finally:
+                busy["on"] = False
+            card = pending_card(agent, out)
+            store.add("bot", card or out)
+            continue
+        if cmd:
+            local = handle_local(agent, cmd, args)
+            store.add("user", text)
+            if local is None:
+                store.add("sys", f"unknown command /{cmd} — try /help")
+                continue
+            card = pending_card(agent, local)
+            store.add("bot", card or local)
+            continue
+        store.add("user", text)
+        busy["on"] = True
+        before = agent.session_tool_calls
+        try:
+            with Spinner():
+                out = agent.ask(text, {"chat_id": agent.chat_id})
+        except Exception as err:
+            out = f"Error: {err}"
+        finally:
+            busy["on"] = False
+        used = agent.session_tool_calls - before
+        card = pending_card(agent, out)
+        store.add("bot", card or out)
+        st = agent.memory.stats(agent.chat_id)
+        store.add("sys", f"{used} tool calls · {len(agent.recent) // 2} exchanges · mem {st['memory']}")
 
 
 def _build_prompt_session():
@@ -477,6 +606,7 @@ def _cli_help() -> str:
             ("/usage", "session + memory usage"),
             ("/memory …", "budgets · pending · approve <id|all> · reject"),
             ("/skills …", "list · pending · approve · diff <id>"),
+            ("/learn …", "save workflow as skill: /learn name | material"),
             ("/model …", "show or switch model"),
             ("exit", "quit")]
     lines = ["commands", rule(40)]
