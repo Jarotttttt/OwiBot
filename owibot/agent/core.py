@@ -1,12 +1,18 @@
 """OwiBot agent loop (Hermes Fase 1): tiered prompt, frozen memory snapshot, session ops."""
 from __future__ import annotations
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from .memory import MemoryStore
 from .skills import SkillsLoader
 from .staging import StagedStore
 from .tools import TOOLS, PENDING_PREFIX, LocalTools
+
+PLAN_BLOCKED = {"write_file", "exec", "execute_code", "delegate_task", "cron_job"}
+PLAN_TOOLS = [t for t in TOOLS if t["function"]["name"] not in PLAN_BLOCKED]
+PLAN_NOTE = ("PLAN MODE: inspect context and write a markdown implementation plan instead of "
+             "executing. Do not call write/exec/code/delegate/cron tools.")
 from ..provider.provider import LLMProvider
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "AGENTS.md"
@@ -31,6 +37,7 @@ class Agent:
         self.last_user = ""
         self.session_tool_calls = 0
         self.pending: dict[str, dict] = {}
+        self.last_trace: list[dict] = []
         self.staged_memory = StagedStore(workspace / "memory" / "pending.json")
         self.staged_skills = StagedStore(workspace / "skills" / "pending.json")
         self.tools.set_delegate_factory(self._run_subagent)
@@ -65,6 +72,8 @@ class Agent:
         self.pending = {}
         prompt = (f"[Scheduled Task] Timer finished.\nInstruction: {user_text.strip()}."
                   if is_cron else user_text)
+        if tool_ctx.get("plan"):
+            prompt = PLAN_NOTE + "\n\n" + prompt
         messages = self._build_messages(prompt, created_at_iso=created_at_iso)
         return self._run(messages, self.max_steps, top_level=True, user_text=user_text,
                          is_cron=is_cron)
@@ -72,10 +81,13 @@ class Agent:
     def _run(self, messages: list[dict], steps_left: int, top_level: bool,
              user_text: str, is_cron: bool) -> str:
         from .tools import parse_pending_marker
+        plan = bool(self.tools._context.get("plan"))
+        schemas = PLAN_TOOLS if plan else TOOLS
         final, calls = "", 0
+        trace: list[dict] = []
         while steps_left > 0:
             steps_left -= 1
-            resp = self.llm.chat(messages, tools=TOOLS)
+            resp = self.llm.chat(messages, tools=schemas)
             if not resp["tool_calls"]:
                 final = (resp["text"] or "").strip() or "(empty response)"
                 messages.append({"role": "assistant", "content": final}); break
@@ -83,7 +95,14 @@ class Agent:
             messages.append({"role": "assistant", "content": resp["text"] or "", "tool_calls": [{"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}} for tc in resp["tool_calls"]]})
             paused = None
             for tc in resp["tool_calls"]:
-                result = self.tools.dispatch(tc["name"], tc["arguments"])[:5000]
+                start = time.monotonic()
+                if plan and tc["name"] in PLAN_BLOCKED:
+                    result = f"ERROR: {tc['name']} is disabled in plan mode"
+                else:
+                    result = self.tools.dispatch(tc["name"], tc["arguments"])[:5000]
+                elapsed = time.monotonic() - start
+                trace.append({"tool": tc["name"], "args": tc["arguments"],
+                              "preview": result[:300], "secs": round(elapsed, 1)})
                 if pid := parse_pending_marker(result):
                     op = self.tools.pending_ops.pop(pid, None)
                     if op is None:
@@ -102,6 +121,7 @@ class Agent:
                 return paused
 
         if not final: final = "I couldn't finish this in one pass (too many tool steps). Please try again with a more specific request."
+        self.last_trace = trace
         return self._finish(final, calls, top_level, user_text, is_cron)
 
     def _finish(self, final: str, calls: int, top_level: bool,
@@ -269,6 +289,13 @@ class Agent:
                 f"{self.session_tool_calls} tool calls this process. "
                 f"History: {st['turns']} turns / ~{st['chars']} chars. "
                 f"Memory budget: {st['memory']}. User profile: {st['user']}.")
+
+    CTX_BUDGET = 128000  # rough prompt budget for the ctx meter
+
+    def context_usage(self) -> tuple[int, int]:
+        chars = len(self._stable or "") + len(self._snapshot or "") + sum(
+            len(str(m.get("content", ""))) for m in self.recent)
+        return chars, min(99, chars * 100 // self.CTX_BUDGET)
 
     def set_model(self, model: str) -> str:
         model = (model or "").strip()

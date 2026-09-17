@@ -508,29 +508,46 @@ def run_plain_loop(agent: Agent) -> None:
 
 
 def run_tui_loop(agent: Agent) -> None:
+    from pathlib import Path as _Path
     from .theme import Spinner
-    from .tui import MessageStore, build_app, parse_local, status_line
+    from .tui import MessageStore, build_app, parse_local, status_frags, top_frags
     store = MessageStore()
-    store.add("sys", "OwiBot console — /help for commands, Ctrl+C to quit.")
+    store.add("sys", "OwiBot console — /help for commands, tab switches build/plan, Ctrl+C quits.")
     busy = {"on": False}
+    mode = {"name": "build"}
+    project = _Path.cwd().name
 
-    def frags():
-        st = agent.memory.stats(agent.chat_id)
-        return status_line(agent.llm.model, len(agent.recent) // 2,
-                           agent.session_tool_calls, st["memory"], busy["on"])
+    def top():
+        _, pct = agent.context_usage()
+        return top_frags(project, agent.llm.model, pct)
+
+    def status():
+        if busy["on"]:
+            return [("class:status", " ● working — one moment… ")]
+        return status_frags()
 
     while True:
         try:
-            app = build_app(store, frags, str(app_home() / "cli_history"))
+            app = build_app(store, top, status, str(app_home() / "cli_history"),
+                            title=f"{mode['name']} · {agent.llm.model}")
             text = (app.run() or "").strip()
         except Exception as err:
             print(f"TUI unavailable ({err}), falling back to plain mode.")
             return run_plain_loop(agent)
         if text in {"/__quit__"} or text.lower() in {"exit", "quit"}:
             break
+        if text == "/__tab__":
+            mode["name"] = "plan" if mode["name"] == "build" else "build"
+            store.add("sys", f"mode: {mode['name']}" + (" — planning only, writes disabled"
+                                                        if mode["name"] == "plan" else ""))
+            continue
         if not text:
             continue
         cmd, args = parse_local(text)
+        if cmd == "verbose":
+            store.verbose = not store.verbose
+            store.add("sys", f"verbose tool output: {'on' if store.verbose else 'off'}")
+            continue
         if cmd == "learn":
             name, _, material = args.partition("|")
             if not name.strip() or not material.strip():
@@ -541,7 +558,7 @@ def run_tui_loop(agent: Agent) -> None:
             try:
                 with Spinner():
                     out = agent.ask(Agent.learn_prompt(name.strip(), material.strip()),
-                                    {"chat_id": agent.chat_id})
+                                    {"chat_id": agent.chat_id, "plan": mode["name"] == "plan"})
             except Exception as err:
                 out = f"Error: {err}"
             finally:
@@ -560,19 +577,18 @@ def run_tui_loop(agent: Agent) -> None:
             continue
         store.add("user", text)
         busy["on"] = True
-        before = agent.session_tool_calls
         try:
             with Spinner():
-                out = agent.ask(text, {"chat_id": agent.chat_id})
+                out = agent.ask(text, {"chat_id": agent.chat_id,
+                                       "plan": mode["name"] == "plan"})
         except Exception as err:
             out = f"Error: {err}"
         finally:
             busy["on"] = False
-        used = agent.session_tool_calls - before
+        for entry in agent.last_trace:
+            store.add("tool", entry)
         card = pending_card(agent, out)
         store.add("bot", card or out)
-        st = agent.memory.stats(agent.chat_id)
-        store.add("sys", f"{used} tool calls · {len(agent.recent) // 2} exchanges · mem {st['memory']}")
 
 
 def _build_prompt_session():
@@ -607,6 +623,7 @@ def _cli_help() -> str:
             ("/memory …", "budgets · pending · approve <id|all> · reject"),
             ("/skills …", "list · pending · approve · diff <id>"),
             ("/learn …", "save workflow as skill: /learn name | material"),
+            ("/verbose", "toggle full tool output (TUI)"),
             ("/model …", "show or switch model"),
             ("exit", "quit")]
     lines = ["commands", rule(40)]
