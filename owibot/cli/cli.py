@@ -194,9 +194,6 @@ def ensure_workspace_layout() -> Path:
     mem_src = prompts / "MEMORY.md"
     mem_dst = workspace / "memory" / "MEMORY.md"
     if mem_src.exists() and not mem_dst.exists(): shutil.copyfile(mem_src, mem_dst)
-    user_src = prompts / "USER.md"
-    user_dst = workspace / "memory" / "USER.md"
-    if user_src.exists() and not user_dst.exists(): shutil.copyfile(user_src, user_dst)
     builtin_skills = (Path(__file__).resolve().parent.parent / "skills")
     for d in builtin_skills.iterdir() if builtin_skills.exists() else []:
         src = d / "SKILL.md"
@@ -206,27 +203,9 @@ def ensure_workspace_layout() -> Path:
         if not dst.exists(): shutil.copyfile(src, dst)
     return workspace
 
-def _gate_flags(config: dict) -> tuple[bool, bool]:
-    mem = config.get("memory") if isinstance(config.get("memory"), dict) else {}
-    skl = config.get("skills") if isinstance(config.get("skills"), dict) else {}
-    return bool(mem.get("write_approval")), bool(skl.get("write_approval"))
-
-
 def build_agent_from_config(config: dict) -> Agent:
     workspace = ensure_workspace_layout()
-    agent = Agent(workspace=workspace, llm=LLMProvider(model=_pick(config.get("model")), api_key=get_secret(config), base_url=_pick(config.get("api_base")), cwd=str(workspace)))
-    agent.tools.require_approval = False
-    agent.tools.gate_memory_writes, agent.tools.gate_skill_writes = _gate_flags(config)
-    return agent
-
-def build_chat_agent(config: dict, chat_id: str = "default") -> Agent:
-    """Per-chat agent: applies persisted /model override for this chat."""
-    workspace = ensure_workspace_layout()
-    agent = Agent(workspace=workspace, llm=LLMProvider(model=_pick(config.get("model")), api_key=get_secret(config), base_url=_pick(config.get("api_base")), cwd=str(workspace)), chat_id=chat_id)
-    agent.tools.gate_memory_writes, agent.tools.gate_skill_writes = _gate_flags(config)
-    if saved := agent.memory.load_meta(chat_id, "model"):
-        agent.llm.model = saved
-    return agent
+    return Agent(workspace=workspace, llm=LLMProvider(model=_pick(config.get("model")), api_key=get_secret(config), base_url=_pick(config.get("api_base")), cwd=str(workspace)))
 
 def build_agent() -> Agent:
     interactive = len(sys.argv) == 1 and sys.stdin.isatty() and sys.stdout.isatty()
@@ -244,12 +223,11 @@ def run_gateway_command(args: list[str] | None = None) -> int:
     args = args or []
     if "--stop" in args:
         print(stop(app_home())); return 0
-    cfg_path = ensure_global_config(interactive_setup=False)
-    config = load_config(cfg_path)
+    config = load_config(ensure_global_config(interactive_setup=False))
     enabled, token, allow_from = _parse_telegram_settings(config)
-    if not enabled: print("Telegram is disabled. Add channels.telegram in ~/.owibot/config.json or run `owibot onboard`."); return 1
-    if not token: print("Missing Telegram token. Set channels.telegram.token or run `owibot onboard`."); return 1
-    if not allow_from: print("Missing Telegram allowlist. Set channels.telegram.allow_from to ['*'] or specific user IDs/usernames, or run `owibot onboard`."); return 1
+    if not enabled: print("Telegram is disabled. Add channels.telegram in ~/.owibot/config.json or run `owibot setup`."); return 1
+    if not token: print("Missing Telegram token. Set channels.telegram.token or run `owibot setup`."); return 1
+    if not allow_from: print("Missing Telegram allowlist. Set channels.telegram.allow_from to ['*'] or specific user IDs/usernames, or run `owibot setup`."); return 1
     if "--fg" not in args and "--fg-child" not in args:
         try:
             pid, log = start_detached(app_home())
@@ -261,15 +239,7 @@ def run_gateway_command(args: list[str] | None = None) -> int:
         print(f"Gateway already running in background (pid {pid}). Stop it first: owibot gateway --stop"); return 1
     try: from ..channels import TelegramGateway, TelegramSettings
     except Exception as err: print(f"Telegram dependency missing: {err}"); print("Install python-telegram-bot>=22,<23"); return 1
-    try: from ..channels.voice import make_transcriber
-    except Exception: make_transcriber = None
-    def save_global_model(model: str) -> None:
-        config["model"] = model; write_config(cfg_path, config)
-    voice_fn = None
-    if make_transcriber:
-        try: voice_fn = make_transcriber(_pick(config.get("api_base")), get_secret(config))
-        except RuntimeError: voice_fn = None
-    gateway = TelegramGateway(settings=TelegramSettings(token=token, allow_from=allow_from), agent_factory=lambda chat_id="default": build_chat_agent(config, chat_id), cron_path=(app_home() / "workspace" / "cron" / "cron.json"), save_global_model=save_global_model, voice_transcribe=voice_fn)
+    gateway = TelegramGateway(settings=TelegramSettings(token=token, allow_from=allow_from), agent_factory=lambda: build_agent_from_config(config), cron_path=(app_home() / "workspace" / "cron" / "cron.json"))
     print("OwiBot gateway started (Telegram). Press Ctrl+C to stop.")
     try: asyncio.run(gateway.run_forever())
     except KeyboardInterrupt: print("\nOwiBot gateway stopped.")
@@ -360,29 +330,16 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "setup": run_setup_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "gateway": run_gateway_command(sys.argv[2:]); return
     if len(sys.argv) >= 2 and sys.argv[1] == "service": run_service_command(sys.argv[2:]); return
-    print_usage()
+    try: agent = build_agent()
+    except RuntimeError as err: print(f"Config error: {err}"); print(f"Set api_key in {app_home() / 'config.json'}." ); return
+    if len(sys.argv) > 1: print(agent.ask(" ".join(sys.argv[1:]))); return
+    if sys.stdout.isatty(): _clear_screen()
+    print("OwiBot ready. Type 'exit' to quit.")
+    while True:
+        try: text = input("> ").strip()
+        except EOFError: print(); break
+        if not text: continue
+        if text.lower() in {"exit", "quit"}: break
+        print(agent.ask(text))
 
-
-def print_usage() -> None:
-    from . import ui
-    print(f"{ui.green(ui.uni(chr(0x25c9), '*') + ' owibot')} - Telegram AI agent console")
-    print("  owibot setup               guided setup (provider, model, Telegram)")
-    print("  owibot setup --help-flags  non-interactive flags")
-    print("  owibot gateway             start the Telegram bot (background)")
-    print("  owibot gateway --fg        run attached (Ctrl+C to stop)")
-    print("  owibot gateway --stop      stop the background bot")
-    print("  owibot service install     autostart at logon")
-    print("  owibot doctor              diagnose this machine")
-    print(ui.dim("  chatting happens in Telegram - the terminal is only mission control."))
-
-
-def _version() -> str:
-    try:
-        from importlib.metadata import version
-        return version("owibot")
-    except Exception:
-        return "dev"
-
-
-if __name__ == "__main__": main()
 if __name__ == "__main__": main()

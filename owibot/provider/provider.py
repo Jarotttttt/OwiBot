@@ -43,7 +43,7 @@ class LLMProvider:
 
     def chat(self, messages: list[dict], tools: Optional[list[dict]] = None) -> dict:
         if self.base_url == "codex": return self._chat_codex(messages, tools)
-        body = {"model": self.model, "messages": messages, "temperature": 0.2, "stream": False}
+        body = {"model": self.model, "messages": messages, "temperature": 0.2}
         if tools: body["tools"], body["tool_choice"] = tools, "auto"
         req = urllib.request.Request(url=f"{self.base_url}/chat/completions", data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}, method="POST")
         with urllib.request.urlopen(req, timeout=300) as resp: msg = json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]

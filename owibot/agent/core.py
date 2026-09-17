@@ -1,22 +1,13 @@
-"""OwiBot agent loop (Hermes Fase 1): tiered prompt, frozen memory snapshot, session ops."""
 from __future__ import annotations
 import json
-import time
 from datetime import datetime
 from pathlib import Path
 from .memory import MemoryStore
 from .skills import SkillsLoader
-from .staging import StagedStore
-from .tools import TOOLS, PENDING_PREFIX, LocalTools
-
-PLAN_BLOCKED = {"write_file", "exec", "execute_code", "delegate_task", "cron_job"}
-PLAN_TOOLS = [t for t in TOOLS if t["function"]["name"] not in PLAN_BLOCKED]
-PLAN_NOTE = ("PLAN MODE: inspect context and write a markdown implementation plan instead of "
-             "executing. Do not call write/exec/code/delegate/cron tools.")
+from .tools import TOOLS, LocalTools
 from ..provider.provider import LLMProvider
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "AGENTS.md"
-
 
 def _load_rules(primary: Path, fallback: Path) -> str:
     for p in (primary, fallback):
@@ -25,292 +16,43 @@ def _load_rules(primary: Path, fallback: Path) -> str:
         if text: return text
     raise RuntimeError(f"Missing or unreadable prompt file: {primary} (fallback: {fallback})")
 
-
 class Agent:
-    def __init__(self, workspace: Path, llm: LLMProvider, chat_id: str = "default"):
-        self.workspace, self.llm, self.chat_id = workspace, llm, chat_id
+    def __init__(self, workspace: Path, llm: LLMProvider):
+        self.workspace, self.llm = workspace, llm
         self.memory, self.skills = MemoryStore(workspace), SkillsLoader(workspace)
         self.tools = LocalTools(workspace)
-        self.tools._memory = self.memory
         self.workspace_prompt_path = (workspace / "AGENTS.md").resolve()
+        self.skill_summary = "; ".join(f"{n}: {str((self.skills.get_skill_metadata(n) or {}).get('description', '')).strip() or 'no description'}" for n in (s["name"] for s in self.skills.list_skills()))
+        self.skills_text = self.skills.load_skills_for_context(self.skills.get_always_skills())
         self.recent: list[dict] = []; self.max_steps = 30
-        self.last_user = ""
-        self.session_tool_calls = 0
-        self.pending: dict[str, dict] = {}
-        self.last_trace: list[dict] = []
-        self.staged_memory = StagedStore(workspace / "memory" / "pending.json")
-        self.staged_skills = StagedStore(workspace / "skills" / "pending.json")
-        self.tools.set_delegate_factory(self._run_subagent)
-        self.freeze_snapshot()
-
-    # -- prompt tiers (stable / context-frozen / volatile) ----------------
-    def freeze_snapshot(self) -> None:
-        """Capture memory + skill index once per session (Hermes frozen pattern)."""
-        self._stable = _load_rules(self.workspace_prompt_path, PROMPT_PATH)
-        self._skill_index = self.skills.index_text()
-        self._always = self.skills.load_skills_for_context(self.skills.get_always_skills())
-        self._snapshot = self.memory.snapshot()
 
     def _build_messages(self, user_text: str, created_at_iso: str = "") -> list[dict]:
-        parts = [self._stable]
-        if self._skill_index:
-            parts.append("## Skills index (use skill_view to load one)\n" + self._skill_index)
-        if self._always:
-            parts.append("## Always-loaded skills\n" + self._always)
-        parts.append(self._snapshot)
-        system = "\n\n---\n\n".join(parts)
-        if created_at_iso:
-            system += f"\n\n## Runtime\n- created_at_iso: {created_at_iso}"
+        parts = [_load_rules(self.workspace_prompt_path, PROMPT_PATH), "## Memory files\n- long-term: memory/MEMORY.md\n- history: memory/history/YYYY-MM-DD.jsonl"]
+        recalled = self.memory.search_history(user_text, k=5)
+        if self.skills_text: parts.append("## Skills\n" + self.skills_text)
+        if (text := self.memory.read_memory().strip()): parts.append("## Long-term memory\n" + text)
+        if recalled: parts.append("## Relevant history\n" + "\n\n".join(recalled))
+        system = "\n\n---\n\n".join(parts) + (f"\n\n## Skill Discovery\n- available: {self.skill_summary}" if self.skill_summary else "") + (f"\n\n## Runtime\n- created_at_iso: {created_at_iso}" if created_at_iso else "")
         return [{"role": "system", "content": system}, *self.recent[-10:], {"role": "user", "content": user_text}]
 
     def ask(self, user_text: str, context: dict | None = None) -> str:
         created_at_iso = datetime.now().astimezone().replace(microsecond=0).isoformat()
-        tool_ctx = {**(context or {}), "created_at_iso": created_at_iso,
-                    "chat_id": self.chat_id}
+        tool_ctx = {**(context or {}), "created_at_iso": created_at_iso}
         is_cron = bool(tool_ctx.get("is_cron"))
         self.tools.set_context(tool_ctx)
-        self.pending = {}
-        prompt = (f"[Scheduled Task] Timer finished.\nInstruction: {user_text.strip()}."
-                  if is_cron else user_text)
-        if tool_ctx.get("plan"):
-            prompt = PLAN_NOTE + "\n\n" + prompt
-        messages = self._build_messages(prompt, created_at_iso=created_at_iso)
-        return self._run(messages, self.max_steps, top_level=True, user_text=user_text,
-                         is_cron=is_cron)
+        messages = self._build_messages(f"[Scheduled Task] Timer finished.\nInstruction: {user_text.strip()}." if is_cron else user_text, created_at_iso=created_at_iso)
+        final = ""
 
-    def _run(self, messages: list[dict], steps_left: int, top_level: bool,
-             user_text: str, is_cron: bool) -> str:
-        from .tools import parse_pending_marker
-        plan = bool(self.tools._context.get("plan"))
-        schemas = PLAN_TOOLS if plan else TOOLS
-        final, calls = "", 0
-        trace: list[dict] = []
-        while steps_left > 0:
-            steps_left -= 1
-            resp = self.llm.chat(messages, tools=schemas)
+        for _ in range(self.max_steps):
+            resp = self.llm.chat(messages, tools=TOOLS)
             if not resp["tool_calls"]:
                 final = (resp["text"] or "").strip() or "(empty response)"
                 messages.append({"role": "assistant", "content": final}); break
-            calls += len(resp["tool_calls"])
             messages.append({"role": "assistant", "content": resp["text"] or "", "tool_calls": [{"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}} for tc in resp["tool_calls"]]})
-            paused = None
             for tc in resp["tool_calls"]:
-                start = time.monotonic()
-                if plan and tc["name"] in PLAN_BLOCKED:
-                    result = f"ERROR: {tc['name']} is disabled in plan mode"
-                else:
-                    result = self.tools.dispatch(tc["name"], tc["arguments"])[:5000]
-                elapsed = time.monotonic() - start
-                trace.append({"tool": tc["name"], "args": tc["arguments"],
-                              "preview": result[:300], "secs": round(elapsed, 1)})
-                if pid := parse_pending_marker(result):
-                    op = self.tools.pending_ops.pop(pid, None)
-                    if op is None:
-                        result = "ERROR: approval state lost; retry the action"
-                    else:
-                        self.pending[pid] = {"messages": messages, "tc": tc,
-                                             "steps_left": steps_left, "op": op,
-                                             "top_level": top_level, "user_text": user_text,
-                                             "is_cron": is_cron, "calls": calls}
-                        messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                         "name": tc["name"], "content": "AWAITING_USER_DECISION"})
-                        paused = result
-                        break
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "name": tc["name"], "content": result})
-            if paused:
-                return paused
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "name": tc["name"], "content": self.tools.dispatch(tc["name"], tc["arguments"])[:5000]})
 
         if not final: final = "I couldn't finish this in one pass (too many tool steps). Please try again with a more specific request."
-        self.last_trace = trace
-        return self._finish(final, calls, top_level, user_text, is_cron)
-
-    def _finish(self, final: str, calls: int, top_level: bool,
-                user_text: str, is_cron: bool) -> str:
-        self.session_tool_calls += calls
-        if top_level:
-            self.last_user = user_text
-            self.recent = [*self.recent, {"role": "user", "content": user_text},
-                           {"role": "assistant", "content": final}][-10:]
-            self.memory.append_turn(user_text, final, self.chat_id)
-            if calls >= 5 and not is_cron:
-                final += ("\n\nTIP: this took several tool steps. Reply `/learn <name>` and I will "
-                          "save the workflow as a reusable skill.")
+        self.recent = [*self.recent, {"role": "user", "content": user_text}, {"role": "assistant", "content": final}][-10:]
+        self.memory.append_turn(user_text, final)
         return final
-
-    # -- approval + clarify resume --------------------------------------
-    def _resume(self, pid: str, tool_result: str) -> str:
-        entry = self.pending.pop(pid, None)
-        if entry is None:
-            return "ERROR: no such pending request (it may have expired)."
-        tc = entry["tc"]
-        entry["messages"][:] = [m for m in entry["messages"]
-                                if not (m.get("role") == "tool" and m.get("tool_call_id") == tc["id"]
-                                        and m.get("content") == "AWAITING_USER_DECISION")]
-        entry["messages"].append({"role": "tool", "tool_call_id": tc["id"],
-                                  "name": tc["name"], "content": tool_result[:5000]})
-        out = self._run(entry["messages"], entry["steps_left"], top_level=entry["top_level"],
-                        user_text=entry["user_text"], is_cron=entry["is_cron"])
-        self.session_tool_calls += entry["calls"]
-        return out
-
-    def approve(self, pid: str) -> str:
-        entry = self.pending.get(pid)
-        if entry is None or entry["op"].get("kind") != "approve":
-            return "ERROR: no such approval request."
-        op = entry["op"]
-        return self._resume(pid, self.tools.dispatch(op["tool"], op["args"], force=True))
-
-    def deny(self, pid: str) -> str:
-        entry = self.pending.get(pid)
-        if entry is None or entry["op"].get("kind") != "approve":
-            return "ERROR: no such approval request."
-        return self._resume(pid, "Denied by the user. Do the task another way or propose alternatives.")
-
-    def answer_clarify(self, pid: str, answer: str) -> str:
-        entry = self.pending.get(pid)
-        if entry is None or entry["op"].get("kind") != "clarify":
-            return "ERROR: no such clarify request."
-        answer = (answer or "").strip() or "(no answer given)"
-        return self._resume(pid, f"User's answer: {answer}")
-
-    def _run_subagent(self, task: str, budget: int) -> str:
-        child = Agent(workspace=self.workspace, llm=self.llm,
-                      chat_id=f"{self.chat_id}:sub")
-        child.max_steps = budget
-        return child.ask(task, {"chat_id": child.chat_id, "subagent": True})
-
-    # -- staged-write review (/memory /skills) ----------------------------
-    def _review(self, store: StagedStore, apply, raw: str, what: str) -> str:
-        parts = (raw or "").strip().split()
-        if not parts or parts[0] == "pending":
-            items = store.list()
-            if not items:
-                return f"No staged {what} writes."
-            return f"Staged {what} writes:\n" + "\n".join(
-                f"[{i['id']}] {i['gist']}" for i in items)
-        if parts[0] == "approve":
-            if len(parts) < 2:
-                return f"Usage: /{what} approve <id|all>"
-            targets = store.pop_all() if parts[1] == "all" else [store.pop(parts[1])]
-            if not targets or targets[0] is None:
-                return f"No staged entry {parts[1]}."
-            return "\n".join(apply(t) for t in targets if t)
-        if parts[0] == "reject":
-            if len(parts) < 2:
-                return f"Usage: /{what} reject <id|all>"
-            if parts[1] == "all":
-                n = len(store.pop_all())
-                return f"Rejected {n} staged {what} write(s)."
-            return f"Rejected staged entry {parts[1]}." if store.pop(parts[1]) else f"No staged entry {parts[1]}."
-        return f"Usage: /{what} [pending|approve <id|all>|reject <id|all>]"
-
-    def memory_review(self, raw: str) -> str:
-        def apply(item: dict) -> str:
-            op = item["op"]
-            try:
-                if op["action"] == "add": res = self.memory.add(op["target"], op["content"])
-                elif op["action"] == "replace": res = self.memory.replace(op["target"], op["old_text"], op["content"])
-                else: res = self.memory.remove(op["target"], op["old_text"])
-                return f"[{item['id']}] {res}"
-            except Exception as err:
-                return f"[{item['id']}] FAILED: {err}"
-        return self._review(self.staged_memory, apply, raw, "memory")
-
-    def skills_review(self, raw: str) -> str:
-        parts = (raw or "").strip().split()
-        if parts[:1] == ["diff"]:
-            if len(parts) < 2:
-                return "Usage: /skills diff <id>"
-            found = next((i for i in self.staged_skills.list() if str(i["id"]) == parts[1]), None)
-            if not found:
-                return f"No staged entry {parts[1]}."
-            return self._skill_diff(found)
-        def apply(item: dict) -> str:
-            op = item["op"]
-            try:
-                if op["action"] in {"create", "edit"}:
-                    res = "skill saved at " + self.skills.save_skill(op["name"], op["content"])
-                elif op["action"] == "patch":
-                    res = "skill patched at " + self.skills.patch_skill(op["name"], op["old_string"], op["new_string"])
-                else:
-                    res = "skill deleted" if self.skills.delete_skill(op["name"]) else "skill not found"
-                return f"[{item['id']}] OK: {res}"
-            except Exception as err:
-                return f"[{item['id']}] FAILED: {err}"
-        return self._review(self.staged_skills, apply, raw, "skills")
-
-    def _skill_diff(self, item: dict) -> str:
-        op = item["op"]
-        if op["action"] == "patch":
-            return (f"Diff for staged [{item['id']}] {op['action']} '{op['name']}':\n"
-                    f"--- old\n{op['old_string'][:2000]}\n+++ new\n{op['new_string'][:2000]}")
-        if op["action"] in {"create", "edit"}:
-            return (f"Staged [{item['id']}] {op['action']} '{op['name']}' "
-                    f"({len(op['content'])} chars). Approve to apply; full text in "
-                    f"workspace/skills/pending.json.")
-        return f"Staged [{item['id']}] delete '{op['name']}'."
-
-    # -- session ops (/new /retry /undo /compress /usage /model) ----------
-    def reset(self) -> str:
-        self.recent = []; self.last_user = ""; self.pending = {}; self.freeze_snapshot()
-        return "Started a new conversation (memory snapshot reloaded)."
-
-    def retry(self) -> str:
-        if not self.last_user:
-            return "Nothing to retry yet."
-        self.recent = self.recent[:-2] if len(self.recent) >= 2 else []
-        return self.ask(self.last_user)
-
-    def undo(self) -> str:
-        if len(self.recent) < 2:
-            return "Nothing to undo."
-        self.recent = self.recent[:-2]
-        self.last_user = next(
-            (m["content"] for m in reversed(self.recent) if m["role"] == "user"), "")
-        return "Removed the last exchange."
-
-    def compress(self) -> str:
-        if not self.recent:
-            return "Nothing to compress."
-        lines = []
-        for m in self.recent:
-            role = "USER" if m["role"] == "user" else "BOT"
-            text = str(m.get("content", "")).replace("\n", " ").strip()[:200]
-            if text: lines.append(f"- {role}: {text}")
-        summary = ("# Last compressed summary (%s)\n\n" % datetime.now().strftime("%Y-%m-%d %H:%M")
-                   + "\n".join(lines) + "\n")
-        (self.workspace / "memory" / "last_summary.md").write_text(summary, encoding="utf-8")
-        self.recent = []
-        return f"Context compressed ({len(lines)} turns summarized to memory/last_summary.md)."
-
-    def usage(self) -> str:
-        st = self.memory.stats(self.chat_id)
-        return (f"Session {self.chat_id}: {len(self.recent) // 2} live exchanges, "
-                f"{self.session_tool_calls} tool calls this process. "
-                f"History: {st['turns']} turns / ~{st['chars']} chars. "
-                f"Memory budget: {st['memory']}. User profile: {st['user']}.")
-
-    CTX_BUDGET = 128000  # rough prompt budget for the ctx meter
-
-    def context_usage(self) -> tuple[int, int]:
-        chars = len(self._stable or "") + len(self._snapshot or "") + sum(
-            len(str(m.get("content", ""))) for m in self.recent)
-        return chars, min(99, chars * 100 // self.CTX_BUDGET)
-
-    def set_model(self, model: str) -> str:
-        model = (model or "").strip()
-        if not model:
-            return f"Current model: {self.llm.model}"
-        self.llm.model = model
-        self.memory.save_meta(self.chat_id, "model", model)
-        return f"Model switched to {model} for this chat."
-
-    @staticmethod
-    def learn_prompt(name: str, material: str) -> str:
-        return (
-            f"/learn task: create a reusable skill named '{name.strip()}' from this material. "
-            "Follow the house format: SKILL.md with --- name/description --- frontmatter "
-            "(description max 60 chars), sections When to Use / Procedure / Pitfalls / Verification. "
-            "Capture lessons and decision rules, not chat logs. Save it with skill_manage action=create, "
-            "then reply with a one-line summary of what was saved.\n\nMaterial:\n" + (material or "").strip()
-        )
