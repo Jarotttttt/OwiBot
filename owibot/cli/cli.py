@@ -325,9 +325,18 @@ def run_setup_command() -> int:
     except RuntimeError:
         config = dict(DEFAULT_CONFIG)
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    if not interactive:
+    if not interactive and len(sys.argv) <= 2:
         print("Non-interactive shell: running quick onboard instead (no prompts).")
         return run_onboard_command()
+    if any(a.startswith("--") for a in sys.argv[2:]):
+        from .setup_wizard import run_setup_flags
+        try:
+            config = run_setup_flags(config, sys.argv[2:])
+        except RuntimeError as err:
+            print(f"Setup: {err}"); return 1
+        ensure_workspace_layout()
+        write_config(path, config); print(f"\nSetup completed: {path}")
+        return 0
     try:
         config = run_wizard(config)
     except RuntimeError as err:

@@ -59,6 +59,49 @@ def parse_allowlist(raw: str) -> list[str]:
     return [p.lstrip("@") for p in (x.strip() for x in raw.split(",")) if p]
 
 
+def run_setup_flags(existing: dict, args: list[str]) -> dict:
+    """Non-interactive setup: owibot setup --api-base URL --api-key KEY --model M
+    --token TOK --allow ID1,ID2 [--mem-gate] [--skills-gate] [--yes] [--force]."""
+    def val(*names: str, default: str = "") -> str:
+        for i, a in enumerate(args):
+            if a in names and i + 1 < len(args) and not args[i + 1].startswith("--"):
+                return args[i + 1]
+        return default
+
+    cfg = dict(existing)
+    cfg["api_base"] = val("--api-base", default=str(cfg.get("api_base", "http://127.0.0.1:11434/v1")))
+    cfg["api_key"] = val("--api-key", default=str(cfg.get("api_key", "local"))) or "local"
+    cfg["model"] = val("--model", default=str(cfg.get("model", "")))
+    if not cfg["model"]:
+        raise RuntimeError("missing --model (e.g. --model ag/gemini-3.8-flash-low)")
+    token = val("--token")
+    allow = parse_allowlist(val("--allow"))
+    force = "--force" in args
+    if token:
+        try:
+            who = check_telegram(token)
+        except RuntimeError as err:
+            if not force:
+                raise
+            who = f"(unchecked: {err})"
+        if not allow and not force:
+            raise RuntimeError("missing --allow (your Telegram numeric ID)")
+        cfg["channels"] = {"telegram": {"token": token, "allow_from": allow}}
+        print(f"Telegram: {who}")
+    print("Testing chat completion...")
+    try:
+        print(f"Model replied: {test_chat(cfg['api_base'], cfg['api_key'], cfg['model'])[:120]}")
+    except RuntimeError as err:
+        if not force:
+            raise
+        print(f"{err} (--force: continuing anyway)")
+    cfg["memory"] = {"write_approval": "--mem-gate" in args}
+    cfg["skills"] = {"write_approval": "--skills-gate" in args}
+    if "--yes" not in args and not force:
+        raise RuntimeError("add --yes to confirm saving this config")
+    return cfg
+
+
 def _ask(prompt: str, default: str = "") -> str:
     hint = f" [{default}]" if default else ""
     try:
