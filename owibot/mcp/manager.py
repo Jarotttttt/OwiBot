@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from .client import MCPError, MCPStdioClient
+from ..security import SecretRedactor
 
 logger = logging.getLogger("owibot.mcp")
 
@@ -92,7 +93,8 @@ class MCPManager:
             return f"ERROR: Server MCP '{server_name}' tidak aktif."
 
         try:
-            return client.call_tool(raw_name, arguments)
+            raw_output = client.call_tool(raw_name, arguments)
+            return SecretRedactor.redact(raw_output)
         except Exception as exc:
             return f"ERROR [MCP {server_name}]: {exc}"
 

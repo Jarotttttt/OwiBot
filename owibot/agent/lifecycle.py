@@ -121,7 +121,14 @@ def map_tool_call_to_step(
     plan_steps: list[PlanStep],
     assigned_steps: set[str],
 ) -> PlanStep | None:
-    """Memetakan pemanggilan tool ke plan step yang tepat."""
+    """Memetakan pemanggilan tool ke plan step yang tepat secara unik dan aman.
+
+    - assigned_steps digunakan untuk mencegah dua tool call dalam satu batch
+      dipetakan ke PlanStep yang sama.
+    - Setiap tool call dipetakan ke step unik yang cocok, atau None (unmapped).
+    - Tidak menebak mapping untuk multi-step tasks jika tidak ada token yang cocok.
+    """
+    tool_name = call.get("name", "")
     tool_args = call.get("arguments", {})
     if isinstance(tool_args, str):
         try:
@@ -129,34 +136,119 @@ def map_tool_call_to_step(
         except Exception:
             tool_args = {}
 
-    target_tokens: list[str] = []
-    if "path" in tool_args:
-        p_str = str(tool_args["path"]).strip()
-        target_tokens.append(Path(p_str).name.lower())
-        target_tokens.append(p_str.lower())
-    if "command" in tool_args:
-        cmd_tokens = [t.lower() for t in str(tool_args["command"]).split() if len(t) > 2]
-        target_tokens.extend(cmd_tokens[:3])
-    if "query" in tool_args:
-        target_tokens.extend(str(tool_args["query"]).lower().split()[:3])
+    # Hanya langkah yang belum di-assign di batch ini dan berstatus PENDING atau IN_PROGRESS
+    eligible_steps = [
+        s for s in plan_steps
+        if s.id not in assigned_steps and s.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS)
+    ]
+    if not eligible_steps:
+        return None
 
-    # 1. Cari step PENDING/IN_PROGRESS yang secara eksplisit mencocokkan target_token
-    for step in plan_steps:
-        if step.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
+    # 1. Ekstraksi target file spesifik jika ada
+    explicit_file_target: str | None = None
+    explicit_file_stem: str | None = None
+    for key in ("path", "file_path", "filepath", "target", "filename"):
+        if key in tool_args:
+            val = str(tool_args[key]).strip()
+            if val and val not in (".", "./", ".\\", "/"):
+                p = Path(val)
+                if p.name and p.name not in (".", ".."):
+                    explicit_file_target = p.name.lower()
+                    explicit_file_stem = p.stem.lower()
+                    break
+
+    # Jika pemanggilan tool memiliki target file eksplisit:
+    # HARUS mencocokkan target file tersebut dengan deskripsi langkah.
+    if explicit_file_target and len(explicit_file_target) > 1:
+        for step in eligible_steps:
             step_desc_lower = step.description.lower()
-            if any(token in step_desc_lower for token in target_tokens if len(token) > 1):
+            if explicit_file_target in step_desc_lower or (
+                explicit_file_stem and len(explicit_file_stem) > 2 and explicit_file_stem in step_desc_lower
+            ):
                 return step
 
-    # 2. Fallback deterministik: petakan ke step aktif saat ini yang belum selesai
-    # (Jangan melompat ke step pending berikutnya jika tidak ada kecocokan eksplisit)
-    for step in plan_steps:
-        if step.status == StepStatus.IN_PROGRESS:
-            return step
-    for step in plan_steps:
-        if step.status == StepStatus.PENDING:
-            return step
+        # Jika ada file target spesifik tapi tidak cocok dengan satupun eligible step:
+        # Untuk multi-step, jangan memetakan ke step sembarang!
+        if len(plan_steps) > 1:
+            return None
+        # Untuk tugas tunggal (len(plan_steps) == 1), izinkan fallback jika eligible
+        if len(plan_steps) == 1 and len(eligible_steps) == 1:
+            return eligible_steps[0]
+        return None
 
+    # 2. Untuk tool non-file atau generic (seperti list_dir, exec, query):
+    target_tokens: list[str] = []
+    if "command" in tool_args:
+        cmd_tokens = [t.lower() for t in str(tool_args["command"]).split() if len(t) > 2]
+        target_tokens.extend(cmd_tokens[:5])
+    if "query" in tool_args:
+        target_tokens.extend(str(tool_args["query"]).lower().split()[:5])
+
+    tool_semantic_keywords: dict[str, list[str]] = {
+        "list_dir": ["folder", "direktori", "periksa", "dir", "list"],
+        "read_file": ["baca", "lihat", "buka", "read", "isi"],
+        "write_file": ["tulis", "buat", "simpan", "write", "create", "berkas", "file"],
+        "edit_file": ["edit", "ubah", "modifikasi", "patch", "replace"],
+        "exec": ["jalankan", "eksekusi", "run", "cmd", "perintah"],
+    }
+    if tool_name in tool_semantic_keywords:
+        target_tokens.extend(tool_semantic_keywords[tool_name])
+
+    clean_tokens = [t for t in set(target_tokens) if len(t) > 1]
+    best_step: PlanStep | None = None
+    best_score = 0
+
+    for step in eligible_steps:
+        step_desc_lower = step.description.lower()
+        score = sum(1 for token in clean_tokens if token in step_desc_lower)
+        if score > best_score:
+            best_score = score
+            best_step = step
+
+    if best_step and best_score > 0:
+        return best_step
+
+    # 3. Fallback HANYA jika tugas tunggal (len(plan_steps) == 1) dan step belum terpakai
+    if len(plan_steps) == 1 and len(eligible_steps) == 1:
+        return eligible_steps[0]
+
+    # Jangan menebak mapping untuk multi-step task tanpa token match
     return None
+
+
+def is_execution_task(user_message: str, plan_steps: list[PlanStep]) -> bool:
+    """Menentukan apakah tugas merupakan execution task (memerlukan aksi/tool)."""
+    # 1. Multi-step tasks selalu merupakan execution task
+    if len(plan_steps) > 1:
+        return True
+
+    clean_text = (user_message or "").strip()
+    text_lower = clean_text.lower()
+
+    # 2. Pola bernomor (mis. "1. Buat...", "1) Jalankan...")
+    if re.search(r"(?:^|\n)\s*\d+[\.\)]\s*", clean_text):
+        return True
+
+    # 3. Adanya path atau berkas dengan ekstensi umum
+    if re.search(r"\b[\w\-]+\.(py|txt|json|md|yaml|yml|sh|bat|js|ts|html|css|csv|log|sql|toml|env)\b", text_lower):
+        return True
+    if re.search(r"[a-zA-Z0-9_\-\.]+[/\\][a-zA-Z0-9_\-\.]+", text_lower):
+        return True
+
+    # 4. Kata kerja operasional / perintah eksplisit terhadap sistem/filesystem
+    exec_verbs = (
+        "buatkan", "bangun", "implementasi", "refactor", "coding", "bikin",
+        "buat file", "tulis file", "baca file", "hapus file", "ubah file", "edit file",
+        "buat berkas", "tulis berkas", "baca berkas", "hapus berkas",
+        "jalankan", "eksekusi", "periksa file", "cek file", "lihat file",
+        "install", "pasang", "pytest",
+        "create file", "write file", "read file", "delete file", "run command",
+        "execute", "modify file"
+    )
+    if any(verb in text_lower for verb in exec_verbs):
+        return True
+
+    return False
 
 
 @dataclass
@@ -279,6 +371,10 @@ class AgentLifecycleEngine:
                     if step_obj.id not in steps_with_records:
                         steps_with_records[step_obj.id] = (step_obj, [])
                     steps_with_records[step_obj.id][1].append(rec)
+                else:
+                    state.verification_notes.append(
+                        f"unmapped: [{rec.tool_name}] dijalankan tanpa keterikatan PlanStep."
+                    )
 
             turn_had_verification_failure = False
 
@@ -336,7 +432,6 @@ class AgentLifecycleEngine:
                             "Lakukan tindakan korektif di atas sekarang. Jangan mengulang perintah atau parameter yang persis sama."
                         )
                         conversation.append({"role": "system", "content": recovery_prompt})
-                        break
                     else:
                         # Melebihi batas maksimal 3 attempt: tandai FAILED secara permanen
                         step_obj.status = StepStatus.FAILED
@@ -457,6 +552,12 @@ class AgentLifecycleEngine:
                 assigned_step_ids.add(matched_step.id)
                 if matched_step.status == StepStatus.PENDING:
                     matched_step.status = StepStatus.IN_PROGRESS
+            else:
+                logger.info(
+                    "Tool call '%s' (id=%s) tidak dipetakan ke PlanStep manapun (unmapped).",
+                    tool_name,
+                    call.get("id"),
+                )
 
             progress_desc = self.agent.format_tool_progress(tool_name, tool_args)
             self.notify_progress(state, progress_desc)
@@ -510,9 +611,10 @@ class AgentLifecycleEngine:
         has_failed_step = any(s.status == StepStatus.FAILED for s in state.plan_steps)
         has_unfinished_step = any(s.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS) for s in state.plan_steps)
         is_timeout = (state.step >= state.max_steps) and has_unfinished_step
+        is_execution = is_execution_task(state.user_message, state.plan_steps)
 
         if is_timeout:
-            # PRIORITAS 1: Tandai langkah yang belum selesai sebagai FAILED, bukan COMPLETED
+            # Batas langkah tercapai saat masih ada langkah yang belum selesai
             for s in state.plan_steps:
                 if s.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
                     s.status = StepStatus.FAILED
@@ -526,15 +628,34 @@ class AgentLifecycleEngine:
                     "Beberapa langkah dalam rencana gagal diselesaikan."
                 )
 
-        # Hanya untuk percakapan langsung tanpa pemanggilan tool sama sekali
-        if not state.tool_executions and len(state.plan_steps) == 1 and not has_failed_step:
-            single_step = state.plan_steps[0]
-            if single_step.status == StepStatus.PENDING:
-                single_step.status = StepStatus.COMPLETED
-                single_step.verification_status = VerificationStatus.PASSED
-                single_step.verification_evidence = "Respons percakapan langsung dari model."
-                single_step.verification_reason = "Tuntas pada respons final."
-                single_step.result = final_text[:150]
+        elif is_execution:
+            # Tugas eksekusi: jangan pernah tandai langkah pending/in_progress sebagai success jika belum diverifikasi oleh verifier nyata
+            if has_unfinished_step:
+                for s in state.plan_steps:
+                    if s.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
+                        s.status = StepStatus.FAILED
+                        s.verification_status = VerificationStatus.FAILED
+                        if not state.tool_executions:
+                            s.verification_reason = "Tugas eksekusi selesai tanpa pemanggilan tool yang diperlukan."
+                            s.verification_evidence = "Tidak ada pemanggilan tool yang dieksekusi oleh model untuk langkah ini."
+                        else:
+                            s.verification_reason = "Langkah rencana belum dieksekusi atau belum terverifikasi sebelum model mengakhiri tugas."
+                            s.verification_evidence = "Langkah tetap tidak selesai pada saat finalisasi."
+                has_failed_step = True
+                if not state.tool_executions:
+                    if not final_text or final_text == "(respons kosong)":
+                        final_text = "Tugas eksekusi tidak dapat diselesaikan: tidak ada aksi atau tool yang dipanggil."
+
+        else:
+            # Conversational task murni (non-tool)
+            if not state.tool_executions and len(state.plan_steps) == 1 and not has_failed_step:
+                single_step = state.plan_steps[0]
+                if single_step.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
+                    single_step.status = StepStatus.COMPLETED
+                    single_step.verification_status = VerificationStatus.UNKNOWN
+                    single_step.verification_evidence = ""
+                    single_step.verification_reason = "Tugas percakapan (tanpa tool)."
+                    single_step.result = final_text[:150]
 
         self.agent.last_plan = state.plan_steps
         self.agent.last_lifecycle_state = state
@@ -545,9 +666,10 @@ class AgentLifecycleEngine:
 
         self.agent.memory.append_turn(state.user_message, final_text, chat_id=state.chat_id)
 
-        # PRIORITAS 4: Telemetri turn mencatat error jika terjadi kegagalan / timeout
+        # Telemetri turn mencatat error jika terjadi kegagalan / timeout / unexecuted execution task
         if has_failed_step:
-            self.agent.tracer.finish_turn(final_response=final_text, error=final_text[:200])
+            err_msg = final_text[:200] if final_text else "Eksekusi langkah gagal atau tidak tuntas."
+            self.agent.tracer.finish_turn(final_response=final_text, error=err_msg)
         else:
             self.agent.tracer.finish_turn(final_response=final_text)
 
