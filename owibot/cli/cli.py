@@ -239,13 +239,26 @@ def _parse_telegram_settings(config: dict) -> tuple[bool, str, list[str]]:
     allow_from = [str(v).lstrip("@") for v in telegram.get("allow_from", [])] if isinstance(telegram.get("allow_from"), list) else []
     return bool(telegram), token, allow_from
 
-def run_gateway_command() -> int:
+def run_gateway_command(args: list[str] | None = None) -> int:
+    from .daemon import is_running, start_detached, stop
+    args = args or []
+    if "--stop" in args:
+        print(stop(app_home())); return 0
     cfg_path = ensure_global_config(interactive_setup=False)
     config = load_config(cfg_path)
     enabled, token, allow_from = _parse_telegram_settings(config)
     if not enabled: print("Telegram is disabled. Add channels.telegram in ~/.owibot/config.json or run `owibot onboard`."); return 1
     if not token: print("Missing Telegram token. Set channels.telegram.token or run `owibot onboard`."); return 1
     if not allow_from: print("Missing Telegram allowlist. Set channels.telegram.allow_from to ['*'] or specific user IDs/usernames, or run `owibot onboard`."); return 1
+    if "--fg" not in args and "--fg-child" not in args:
+        try:
+            pid, log = start_detached(app_home())
+        except RuntimeError as err:
+            print(f"Gateway: {err}"); return 1
+        print(f"OwiBot gateway running in background (pid {pid}).\nLog: {log}\nStop: owibot gateway --stop")
+        return 0
+    if "--fg-child" not in args and (pid := is_running(app_home())) is not None:
+        print(f"Gateway already running in background (pid {pid}). Stop it first: owibot gateway --stop"); return 1
     try: from ..channels import TelegramGateway, TelegramSettings
     except Exception as err: print(f"Telegram dependency missing: {err}"); print("Install python-telegram-bot>=22,<23"); return 1
     try: from ..channels.voice import make_transcriber
@@ -345,7 +358,7 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "doctor": run_doctor_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "onboard": run_onboard_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "setup": run_setup_command(); return
-    if len(sys.argv) >= 2 and sys.argv[1] == "gateway": run_gateway_command(); return
+    if len(sys.argv) >= 2 and sys.argv[1] == "gateway": run_gateway_command(sys.argv[2:]); return
     if len(sys.argv) >= 2 and sys.argv[1] == "service": run_service_command(sys.argv[2:]); return
     print_usage()
 
@@ -355,7 +368,9 @@ def print_usage() -> None:
     print(f"{ui.green(ui.uni(chr(0x25c9), '*') + ' owibot')} - Telegram AI agent console")
     print("  owibot setup               guided setup (provider, model, Telegram)")
     print("  owibot setup --help-flags  non-interactive flags")
-    print("  owibot gateway             start the Telegram bot")
+    print("  owibot gateway             start the Telegram bot (background)")
+    print("  owibot gateway --fg        run attached (Ctrl+C to stop)")
+    print("  owibot gateway --stop      stop the background bot")
     print("  owibot service install     autostart at logon")
     print("  owibot doctor              diagnose this machine")
     print(ui.dim("  chatting happens in Telegram - the terminal is only mission control."))

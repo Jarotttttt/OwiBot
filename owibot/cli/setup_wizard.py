@@ -137,11 +137,11 @@ def run_wizard(existing: dict) -> dict:
 
     local = "127.0.0.1" in cfg["api_base"] or "localhost" in cfg["api_base"]
     if local:
-        cfg["api_key"] = ui.ask("API key", str(cfg.get("api_key", "")) or "local") or "local"
+        cfg["api_key"] = ui.ask("API key (optional, Enter = skip)", str(cfg.get("api_key", "")) or "local") or "local"
     else:
-        cfg["api_key"] = ui.ask("API key", str(cfg.get("api_key", "")), secret=True)
+        cfg["api_key"] = ui.ask("API key (optional untuk endpoint tanpa auth)", str(cfg.get("api_key", "")), secret=True)
         if not cfg["api_key"]:
-            print(f"  {ui.yellow('key kosong - test chat kemungkinan gagal.')}")
+            print(f"  {ui.yellow('key kosong - lanjut tanpa auth.')}")
 
     models = probe_models(cfg["api_base"])
     if models:
