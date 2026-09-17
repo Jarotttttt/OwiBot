@@ -390,8 +390,10 @@ def run_chat_loop(agent: Agent) -> None:
         ("history", f"{st['turns']} turns"),
         ("tools", "14 sandboxed"),
     ]))
+    session = _build_prompt_session()
     while True:
-        try: text = input(f"{accent(_uni('➜', '>'))} ").strip()
+        try:
+            text = _read_line(session)
         except EOFError: print(); break
         except KeyboardInterrupt: print(); break
         if not text: continue
@@ -413,6 +415,28 @@ def run_chat_loop(agent: Agent) -> None:
         used = agent.session_tool_calls - before
         print(reply_block(out))
         print(footer(used, len(agent.recent) // 2, agent.memory.usage("memory")))
+
+
+def _build_prompt_session():
+    """prompt_toolkit session, or None when unavailable/non-tty (plain input)."""
+    if not sys.stdin.isatty():
+        return None
+    try:
+        from .prompt import build_session
+    except ImportError:
+        return None
+    try:
+        return build_session(app_home() / "cli_history")
+    except Exception:
+        return None
+
+
+def _read_line(session) -> str:
+    if session is None:
+        from .theme import _uni, accent
+        return input(f"{accent(_uni('➜', '>'))} ").strip()
+    from .prompt import prompt_text
+    return prompt_text(session).strip()
 
 
 def _cli_help() -> str:

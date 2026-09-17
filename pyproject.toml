@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
   "python-telegram-bot>=22.0,<23.0",
+  "prompt_toolkit>=3.0",
 ]
 
 [project.scripts]

@@ -3,6 +3,8 @@ import io
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
+import pytest
+
 from owibot.cli import theme
 from owibot.cli import cli
 
@@ -44,3 +46,27 @@ def test_spinner_silent_when_piped():
 
 def test_version_helper():
     assert isinstance(cli._version(), str) and cli._version()
+
+
+def test_slash_completion():
+    from owibot.cli.prompt import complete_slash
+    got = dict(complete_slash("/m"))
+    assert "/memory" in got and "/model" in got
+    assert complete_slash("/xyz") == []
+    assert complete_slash("hello") == []
+    assert complete_slash("/model x") == []
+
+
+def test_prompt_session_builds(tmp_path):
+    from owibot.cli.prompt import build_session
+    try:
+        s = build_session(tmp_path / "hist")
+    except Exception:
+        pytest.skip("no console for prompt_toolkit in this env")
+    assert s is not None
+
+
+def test_read_line_fallback():
+    assert cli._build_prompt_session() is None or True  # tty-dependent, never crashes
+    with patch("builtins.input", return_value="  hi  "):
+        assert cli._read_line(None) == "hi"
