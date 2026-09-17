@@ -38,9 +38,17 @@ If you want a bot you fully understand and can shape feature-by-feature — star
 
 ```bash
 pip install -e .
-owibot onboard     # interactive: pick provider/model + Telegram token/allowlist
-owibot gateway     # start the Telegram bot (Ctrl+C to stop)
-owibot             # CLI chat (same agent, no Telegram needed)
+owibot setup      # guided wizard: provider → model (tested) → Telegram → protection
+owibot gateway    # start the Telegram bot (Ctrl+C to stop)
+owibot            # CLI chat (same agent, no Telegram needed)
+```
+
+Autostart at Windows logon (no admin needed):
+
+```bash
+owibot service install     # Startup-folder entry
+owibot service status      # check it
+owibot service uninstall   # remove it
 ```
 
 ## Configuration
@@ -153,7 +161,7 @@ owibot/
 - [x] Voice memo transcription (OpenAI audio endpoint; honest fallback otherwise)
 - [x] `/bg` background sessions
 - [x] Memory/skill write-approval staging (`/memory approve`, `/skills diff`)
-- [ ] `systemd` / Task Scheduler service files
+- [x] Guided `owibot setup` wizard + autostart service
 
 ## Credits
 

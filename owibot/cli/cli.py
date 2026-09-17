@@ -317,9 +317,45 @@ def run_onboard_command() -> int:
     write_config(path, config); print(f"\nOnboarding completed: {path}")
     return 0
 
+def run_setup_command() -> int:
+    from .setup_wizard import run_wizard
+    path = ensure_global_config(interactive_setup=False)
+    try:
+        config = load_config(path)
+    except RuntimeError:
+        config = dict(DEFAULT_CONFIG)
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if not interactive:
+        print("Non-interactive shell: running quick onboard instead (no prompts).")
+        return run_onboard_command()
+    try:
+        config = run_wizard(config)
+    except RuntimeError as err:
+        print(f"Setup: {err}"); return 1
+    ensure_workspace_layout()
+    write_config(path, config); print(f"\nSetup completed: {path}")
+    print("Next: `owibot gateway` to start the Telegram bot, or `owibot` to chat in CLI.")
+    return 0
+
+def run_service_command(args: list[str]) -> int:
+    from .service import install, status, uninstall
+    action = (args[0] if args else "status").lower()
+    try:
+        if action == "install":
+            print(install(scheduled="--scheduled" in args[1:], on_start="--on-start" in args[1:]))
+        elif action == "uninstall":
+            print(uninstall())
+        else:
+            print(status())
+    except RuntimeError as err:
+        print(f"Service error: {err}"); return 1
+    return 0
+
 def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "onboard": run_onboard_command(); return
+    if len(sys.argv) >= 2 and sys.argv[1] == "setup": run_setup_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "gateway": run_gateway_command(); return
+    if len(sys.argv) >= 2 and sys.argv[1] == "service": run_service_command(sys.argv[2:]); return
     try: agent = build_agent()
     except RuntimeError as err: print(f"Config error: {err}"); print(f"Set api_key in {app_home() / 'config.json'}." ); return
     if len(sys.argv) > 1: print(cli_ask(agent, " ".join(sys.argv[1:]))); return
