@@ -1,23 +1,62 @@
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.egg
-*.egg-info/
-dist/
-build/
-.eggs/
-.venv/
-venv/
-env/
-*.whl
-*.tar.gz
-MANIFEST
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-.pytest_cache/
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
+[project]
+name = "owibot"
+version = "0.6.0"
+description = "OwiBot - lightweight personal AI assistant controlled from Telegram"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Jarotttttt" },
+]
+keywords = [
+  "telegram",
+  "assistant",
+  "llm",
+  "openai",
+  "automation",
+  "ai-agent",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Communications :: Chat",
+]
+dependencies = [
+  "python-telegram-bot>=22.0,<23.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Jarotttttt/OwiBot"
+Repository = "https://github.com/Jarotttttt/OwiBot"
+Issues = "https://github.com/Jarotttttt/OwiBot/issues"
+Changelog = "https://github.com/Jarotttttt/OwiBot/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+]
+
+[project.scripts]
+owibot = "owibot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["owibot", "owibot.*"]
+
+[tool.setuptools.package-data]
+owibot = ["prompts/AGENTS.md", "prompts/MEMORY.md", "skills/*/SKILL.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
