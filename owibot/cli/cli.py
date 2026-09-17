@@ -391,7 +391,7 @@ def run_chat_loop(agent: Agent) -> None:
         ("tools", "14 sandboxed"),
     ]))
     while True:
-        try: text = input(f"{accent(_uni('›', '>'))} ").strip()
+        try: text = input(f"{accent(_uni('➜', '>'))} ").strip()
         except EOFError: print(); break
         except KeyboardInterrupt: print(); break
         if not text: continue

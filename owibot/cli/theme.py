@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-_ACCENT = "36"   # cyan
+_ACCENT = "32"   # hacker green
 _DIM = "2"
 _BOLD = "1"
 _RED = "31"
@@ -52,7 +52,7 @@ def rule(width: int = 56) -> str:
 
 def banner(version: str, rows: list[tuple[str, str]]) -> str:
     """Startup panel. rows = [(label, value)] shown under the wordmark."""
-    lines = [f"{accent('owibot')} {dim(version)}", rule()]
+    lines = [f"{accent(_uni('◉', '*') + ' owibot')} {dim(version)}", rule()]
     for label, value in rows:
         lines.append(f"{dim(label.ljust(10))} {value}")
     lines.append(rule())
@@ -108,7 +108,7 @@ class Spinner:
         i = 0
         while not self._stop.is_set():
             frame = frames[i % len(frames)]
-            sys.stdout.write(f"\r{dim(frame + ' ' + self.label)}")
+            sys.stdout.write(f"\r{accent(frame + ' ' + self.label)}")
             sys.stdout.flush()
             i += 1
             time.sleep(0.08)
