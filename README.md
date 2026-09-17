@@ -1,82 +1,89 @@
 # OwiBot 🤖
 
-> Lightweight personal AI assistant you control from Telegram. Chat, run tools, remember context, and schedule reminders — Hermes-style core in ~1k lines of Python.
+> Asisten AI pribadi yang kamu kendalikan dari Telegram. Chat, jalankan tools, ingat konteks, dan jadwalkan pengingat — inti gaya Hermes dalam ~1k baris Python.
 
 [![Python](https://img.shields.io/badge/python-%3E%3D3.9-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Telegram](https://img.shields.io/badge/control-Telegram-26A5E4)](https://core.telegram.org/bots)
 
-OwiBot is a from-scratch personal AI agent: Hermes-style memory and skills core, single-channel Telegram control.
+OwiBot adalah AI agent buatan sendiri dari nol: inti memory dan skills ala Hermes, kontrol satu pintu via Telegram.
 
 ---
 
-## Why OwiBot?
+## Kenapa OwiBot?
 
-| | OwiBot | Full frameworks (Hermes / OpenClaw) |
+| | OwiBot | Framework besar (Hermes / OpenClaw) |
 |---|---|---|
-| Size | ~1k lines core | Thousands–400k+ lines |
-| Tools | 10 focused tools | 40–70+ tools |
-| Control | Telegram only | 6–20+ platforms |
-| Memory | Bounded Markdown + SQLite FTS5 | Same pattern, plus vector/user-modeling |
-| Skills | Agent-managed `SKILL.md` + `/learn` | Plus hub, bundles, background review |
-| Best for | Personal bot you can read in one sitting and hack in an afternoon | Autonomous fleets, multi-agent ops |
+| Ukuran | inti ~1k baris | ribuan–400k+ baris |
+| Tools | 14 yang fokus | 40–70+ tools |
+| Kontrol | Telegram saja | 6–20+ platform |
+| Memory | Markdown berbatas + SQLite FTS5 | pola sama, plus vector/user-modeling |
+| Skills | `SKILL.md` dikelola agent + `/learn` | plus hub, bundles, background review |
+| Cocok untuk | bot pribadi yang isinya kamu paham luar-dalam dan gampang dioprek | armada multi-agent, operasi tim |
 
-If you want a bot you fully understand and can shape feature-by-feature — start here.
+Kalau mau bot yang kamu mengerti sepenuhnya dan bisa dibentuk fitur per fitur — mulai dari sini.
 
-## Features
+## Fitur
 
-- 🧠 **Any OpenAI-compatible LLM** — OpenAI, OpenRouter, Ollama, LM Studio, or Codex CLI. Switch by editing one config file.
-- 💬 **Telegram gateway** — long-polling bot (no webhook needed), per-chat agent sessions, allowlist access control. Commands: `/new /model /retry /undo /compress /usage /sessions /memory /skills /learn /bg /stop /help`. Dangerous `exec`/`write_file` pause for inline ✅/❌ approval; `clarify` renders option buttons; voice memos transcribed when the provider allows.
-- 🛠️ **14 sandboxed tools** — files, `exec`, `execute_code` (Python sandbox), `web_search` + `web_fetch`, `memory` (add/replace/remove), `skill_manage` + `skill_view`, `session_search`, `delegate_task` (subagents), `clarify`, `cron_job`. Workspace-jailed; destructive commands blocked.
-- 🧾 **Persistent memory (Hermes-style)** — bounded `MEMORY.md` (2200 chars) + `USER.md` profile (1375 chars), curated via `add/replace/remove`, frozen snapshot per session, plus SQLite FTS5 `session_search` over all past chats.
-- 🧩 **Skills (Hermes-style)** — OpenClaw-compatible `skills/*/SKILL.md`, progressive disclosure (`skill_view` loads full content on demand), agent-managed via `skill_manage` (`create/patch/edit/delete`). `/learn <name> | <material>` saves any workflow as a skill. Ships with `memory` + `cron` policies.
-- ⏰ **Reminders** — one-time (`every_s=0`) or recurring (`every_s>0`), checked every 20s, delivered to the originating chat.
+- 🧠 **LLM OpenAI-compatible apa saja** — OpenAI, OpenRouter, Ollama, LM Studio, atau Codex CLI. Ganti cukup edit satu file config.
+- 💬 **Gateway Telegram** — bot long-polling (tanpa webhook), satu session agent per chat, allowlist akses. Perintah: `/new /model /retry /undo /compress /usage /sessions /memory /skills /learn /bg /stop /help`. `exec`/`write_file` berbahaya berhenti minta persetujuan tombol ✅/❌; `clarify` tampil sebagai tombol pilihan; voice memo ditranskrip kalau provider mendukung.
+- 🛠️ **14 tools tersandbox** — file, `exec`, `execute_code` (sandbox Python), `web_search` + `web_fetch`, `memory` (add/replace/remove), `skill_manage` + `skill_view`, `session_search`, `delegate_task` (subagent), `clarify`, `cron_job`. Semua dikurung di workspace; perintah destruktif diblokir.
+- 🧾 **Memory persisten ala Hermes** — `MEMORY.md` berbatas (2200 char) + profil `USER.md` (1375 char), dikurasi via `add/replace/remove`, snapshot beku per session, plus `session_search` SQLite FTS5 ke semua chat lama.
+- 🧩 **Skills ala Hermes** — `skills/*/SKILL.md` format OpenClaw, progressive disclosure (`skill_view` muat isi penuh hanya saat perlu), dikelola agent via `skill_manage` (`create/patch/edit/delete`). `/learn <nama> | <materi>` menyimpan workflow apa pun jadi skill. Bawaan: kebijakan `memory` + `cron`.
+- ⏰ **Pengingat** — sekali (`every_s=0`) atau berulang (`every_s>0`), dicek tiap 20 detik, dikirim ke chat asal.
 
-## Quick start
+## Mulai cepat
 
-**Requirements:** Python ≥ 3.9, a Telegram bot token ([@BotFather](https://t.me/BotFather)), your Telegram user ID ([@userinfobot](https://t.me/userinfobot)).
+**Syarat:** Python ≥ 3.9, token bot Telegram ([@BotFather](https://t.me/BotFather)), ID Telegram kamu ([@userinfobot](https://t.me/userinfobot)).
 
 ```bash
 pip install -e .
-owibot setup      # guided wizard: provider → model (tested) → Telegram → protection
-owibot gateway    # start the Telegram bot (Ctrl+C to stop)
-owibot doctor     # diagnose this machine
+owibot setup      # wizard: provider → model (dites) → Telegram → proteksi
+owibot gateway    # bot langsung jalan di background
+owibot gateway --stop   # matikan bot background
+owibot doctor     # diagnosa mesin ini
 ```
 
-The terminal is mission control only (setup, gateway, service, doctor) —
-chatting happens in Telegram.
+Terminal hanya mission control (setup, gateway, service, doctor) —
+ngobrolnya di Telegram.
 
-Autostart at Windows logon (no admin needed):
+Jalan otomatis tiap logon Windows (tanpa admin):
 
 ```bash
-owibot service install     # Startup-folder entry
-owibot service status      # check it
-owibot service uninstall   # remove it
+owibot service install     # entri Startup-folder
+owibot service status      # cek status
+owibot service uninstall   # hapus
 ```
 
-## Configuration
+Setup non-interaktif (tanpa menu ketik):
 
-Config lives at `~/.owibot/config.json`, workspace at `~/.owibot/workspace`.
+```bash
+owibot setup --api-base URL --api-key KEY --model MODEL --token TOK --allow ID --yes
+```
 
-**OpenRouter (recommended — many cheap models):**
+## Konfigurasi
+
+Config di `~/.owibot/config.json`, workspace di `~/.owibot/workspace`.
+
+**OpenRouter (rekomendasi — banyak model murah):**
 
 ```json
 {
   "api_base": "https://openrouter.ai/api/v1",
   "model": "z-ai/glm-4.5-air:free",
-  "api_key": "sk-or-v1-YOUR_KEY",
+  "api_key": "sk-or-v1-KUNCI_KAMU",
   "memory": { "write_approval": false },
   "skills": { "write_approval": false },
   "channels": {
     "telegram": {
-      "token": "YOUR_BOT_TOKEN",
-      "allow_from": ["YOUR_TELEGRAM_ID"]
+      "token": "TOKEN_BOT_KAMU",
+      "allow_from": ["ID_TELEGRAM_KAMU"]
     }
   }
 }
 ```
 
-**Local, free via Ollama:**
+**Lokal, gratis via Ollama:**
 
 ```json
 {
@@ -86,90 +93,88 @@ Config lives at `~/.owibot/config.json`, workspace at `~/.owibot/workspace`.
 }
 ```
 
-`allow_from` accepts user IDs, usernames (without `@`), or `"*"` (open — not recommended).
+`allow_from` menerima ID user, username (tanpa `@`), atau `"*"` (terbuka — tidak disarankan).
 
-## How it works
+## Cara kerja
 
 ```
-Telegram / CLI
-      │
-      ▼
+Telegram
+   │
+   ▼
 Agent.ask()  (owibot/agent/core.py)
-  ├─ build system prompt: AGENTS.md + MEMORY.md + recalled history + always-skills + last 10 turns
-  ├─ LLMProvider.chat()  (OpenAI-compatible POST / Codex CLI)
-  ├─ while tool_calls and steps < 30: dispatch via LocalTools, feed results back
-      ▼
-reply + append turn to memory/history/*.jsonl
+  ├─ susun system prompt: AGENTS.md + MEMORY.md + riwayat relevan + always-skills + 10 turn terakhir
+  ├─ LLMProvider.chat()  (POST OpenAI-compatible / Codex CLI)
+  ├─ selama ada tool_calls dan langkah < 30: dispatch via LocalTools, hasilnya dibalikkan lagi
+   ▼
+balasan + turn disimpan ke memory/history/*.jsonl
 ```
 
-The Telegram gateway (`owibot/channels/telegram.py`) keeps one `Agent` per `chat_id`, shows a `typing…` indicator, splits replies over 3900 chars, and runs the cron loop that fires due jobs back to their chat.
+Gateway Telegram (`owibot/channels/telegram.py`) menyimpan satu `Agent` per `chat_id`, menampilkan indikator `typing…`, memecah balasan >3900 char, dan menjalankan loop cron yang menembak job jatuh tempo ke chat asalnya.
 
-## Tools reference
+## Referensi tools
 
-| Tool | What it does | Notes |
+| Tool | Fungsinya | Catatan |
 |---|---|---|
-| `read_file` / `write_file` / `list_dir` | File ops inside workspace | Path escape rejected |
-| `exec` | Run shell command in workspace | Timeout 1–120s, denylist enforced, approval for uncommon binaries |
-| `execute_code` | Run a Python snippet (60s max) | Stdlib, temp file auto-cleaned |
-| `web_search` | Free web search, no API key | DuckDuckGo, labeled untrusted |
-| `delegate_task` | Subagent with own step budget | No nested delegation |
-| `web_fetch` | Fetch URL as text | HTML stripped, labeled untrusted |
-| `memory` | `add` / `replace` / `remove` curated facts | Targets `memory` / `user`, hard budgets |
-| `clarify` | Ask user a question with options | Inline buttons in Telegram |
-| `skill_manage` | `create` / `patch` / `edit` / `delete` / `list` skills | `patch` preferred for fixes |
-| `skill_view` | Load full skill or one reference file | Progressive disclosure |
-| `session_search` | FTS5 search over past chats | Per-chat or global |
-| `cron_job` | `add` / `list` / `remove` reminders | `next_at` ISO datetime |
+| `read_file` / `write_file` / `list_dir` | Operasi file di workspace | Path escape ditolak |
+| `exec` | Perintah shell di workspace | Timeout 1–120 dtk, denylist + approval untuk binary tak umum |
+| `execute_code` | Snippet Python (maks 60 dtk) | Stdlib, file temp auto-hapus |
+| `web_search` | Search web gratis, tanpa API key | DuckDuckGo, dilabel untrusted |
+| `delegate_task` | Subagent dengan budget langkah sendiri | Tanpa delegasi bersarang |
+| `web_fetch` | Ambil URL sebagai teks | HTML dibersihkan, dilabel untrusted |
+| `memory` | Fakta kurasi `add` / `replace` / `remove` | Target `memory` / `user`, budget keras |
+| `clarify` | Tanya user dengan opsi | Tombol inline di Telegram |
+| `skill_manage` | `create` / `patch` / `edit` / `delete` / `list` skills | `patch` diutamakan untuk perbaikan |
+| `skill_view` | Muat skill penuh atau satu file referensi | Progressive disclosure |
+| `session_search` | Cari FTS5 ke chat-chat lama | Per-chat atau global |
+| `cron_job` | Pengingat `add` / `list` / `remove` | `next_at` datetime ISO |
 
 ## Skills
 
-Add a skill by creating `~/.owibot/workspace/skills/<name>/SKILL.md`:
+Tambah skill dengan membuat `~/.owibot/workspace/skills/<nama>/SKILL.md`:
 
 ```markdown
 ---
 name: mystuff
-description: When to use this skill.
+description: Kapan skill ini dipakai.
 always: true
 ---
-
-Instructions injected into every prompt…
 ```
 
-Omit `always` (or set `false`) to keep it dormant until the agent discovers it via the skill list.
+Hilangkan `always` (atau `false`) agar dorman sampai agent menemukannya via daftar skill.
 
-## Project structure
+## Struktur proyek
 
 ```text
 owibot/
-├── agent/       # ReAct loop (core.py), tools.py, memory.py, skills.py
-├── channels/    # Telegram gateway (telegram.py)
-├── cli/         # onboard / gateway / chat entrypoints
-├── provider/    # OpenAI-compatible + Codex CLI adapter
-├── scheduler/   # cron.json store (cron.py)
-├── skills/      # built-in SKILL.md (cron, memory)
-└── prompts/     # AGENTS.md identity, MEMORY.md seed
+├── agent/       # loop ReAct (core.py), tools.py, memory.py, skills.py, staging.py
+├── channels/    # gateway Telegram (telegram.py) + voice.py
+├── cli/         # setup / gateway / service / doctor (ui.py, daemon.py)
+├── provider/    # adapter OpenAI-compatible + Codex CLI
+├── scheduler/   # penyimpanan cron.json (cron.py)
+├── skills/      # SKILL.md bawaan (cron, memory)
+└── prompts/     # identitas AGENTS.md, seed MEMORY.md + USER.md
 ```
 
-## Security
+## Keamanan
 
-- Telegram allowlist enforced before any reply (bot stays silent for strangers on `/start` except a pairing hint).
-- All file/shell tools jailed to the workspace directory.
-- Small denylist for destructive commands; `web_fetch` output is explicitly marked untrusted so the model won't treat pages as instructions.
-- Never commit `~/.owibot/config.json` — it holds your API key + bot token.
+- Allowlist Telegram ditegakkan sebelum balasan apa pun (bot diam ke orang asing, kecuali petunjuk pairing di `/start`).
+- Semua tools file/shell dikurung di direktori workspace.
+- Denylist kecil untuk perintah destruktif; output `web_fetch` ditandai untrusted agar model tidak memperlakukan halaman web sebagai instruksi.
+- Jangan pernah commit `~/.owibot/config.json` — isinya API key + token bot.
 
 ## Roadmap
 
-- [x] `/learn` — save a recurring pattern as a new `SKILL.md` from chat
-- [x] Inline approval buttons for `exec` / `write_file`
-- [x] Voice memo transcription (OpenAI audio endpoint; honest fallback otherwise)
-- [x] `/bg` background sessions
-- [x] Memory/skill write-approval staging (`/memory approve`, `/skills diff`)
-- [x] Guided `owibot setup` wizard + autostart service
+- [x] `/learn` — simpan pola berulang jadi `SKILL.md` baru dari chat
+- [x] Tombol approval inline untuk `exec` / `write_file`
+- [x] Transkripsi voice memo (endpoint audio OpenAI; fallback jujur bila tak bisa)
+- [x] Session background `/bg`
+- [x] Staging persetujuan tulis memory/skill (`/memory approve`, `/skills diff`)
+- [x] Wizard `owibot setup` terpandu + service autostart + gateway background
 
-## Credits
+## Kredit
 
-Designed and built as OwiBot — a lightweight, hackable personal agent.
+Dirancang dan dibangun sebagai OwiBot — agent pribadi yang ringan dan gampang dioprek.
 
-## License
+## Lisensi
 
-MIT — see [LICENSE](LICENSE).
+MIT — lihat [LICENSE](LICENSE).
