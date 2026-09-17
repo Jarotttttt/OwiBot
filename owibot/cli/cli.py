@@ -368,21 +368,66 @@ def main() -> None:
     try: agent = build_agent()
     except RuntimeError as err: print(f"Config error: {err}"); print(f"Set api_key in {app_home() / 'config.json'}." ); return
     if len(sys.argv) > 1: print(cli_ask(agent, " ".join(sys.argv[1:]))); return
+    run_chat_loop(agent)
+
+
+def _version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("owibot")
+    except Exception:
+        return "dev"
+
+
+def run_chat_loop(agent: Agent) -> None:
+    from .theme import Spinner, accent, banner, dim, footer, reply_block
+    from .theme import _uni
     if sys.stdout.isatty(): _clear_screen()
-    print("OwiBot ready. Type 'exit' to quit. Commands: /new /retry /undo /compress /usage /model [name]")
+    st = agent.memory.stats(agent.chat_id)
+    print(banner(_version(), [
+        ("model", agent.llm.model),
+        ("memory", f"{st['memory']} · profile {st['user']}"),
+        ("history", f"{st['turns']} turns"),
+        ("tools", "14 sandboxed"),
+    ]))
     while True:
-        try: text = input("> ").strip()
+        try: text = input(f"{accent(_uni('›', '>'))} ").strip()
         except EOFError: print(); break
+        except KeyboardInterrupt: print(); break
         if not text: continue
         if text.lower() in {"exit", "quit"}: break
+        if text in {"/help", "help"}: print(_cli_help()); continue
         if text == "/new": print(agent.reset()); continue
-        if text == "/retry": print(cli_resolve(agent, agent.retry())); continue
+        if text == "/retry":
+            with Spinner(): out = agent.retry()
+            print(reply_block(cli_resolve(agent, out))); continue
         if text == "/undo": print(agent.undo()); continue
         if text == "/compress": print(agent.compress()); continue
         if text == "/usage": print(agent.usage()); continue
         if text == "/memory" or text.startswith("/memory "): print(cli_memory(agent, text)); continue
         if text == "/skills" or text.startswith("/skills "): print(cli_skills(agent, text)); continue
         if text == "/model" or text.startswith("/model "): print(agent.set_model(text[6:].strip())); continue
-        print(cli_ask(agent, text))
+        before = agent.session_tool_calls
+        with Spinner():
+            out = cli_ask(agent, text)
+        used = agent.session_tool_calls - before
+        print(reply_block(out))
+        print(footer(used, len(agent.recent) // 2, agent.memory.usage("memory")))
+
+
+def _cli_help() -> str:
+    from .theme import dim, rule
+    rows = [("/new", "fresh session, reload memory snapshot"),
+            ("/retry", "re-run the last message"),
+            ("/undo", "drop the last exchange"),
+            ("/compress", "summarize live context to a file"),
+            ("/usage", "session + memory usage"),
+            ("/memory …", "budgets · pending · approve <id|all> · reject"),
+            ("/skills …", "list · pending · approve · diff <id>"),
+            ("/model …", "show or switch model"),
+            ("exit", "quit")]
+    lines = ["commands", rule(40)]
+    lines += [f"  {cmd.ljust(12)} {dim(desc)}" for cmd, desc in rows]
+    return "\n".join(lines)
 
 if __name__ == "__main__": main()
