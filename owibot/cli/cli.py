@@ -1,293 +1,270 @@
+from __future__ import annotations
+
 import asyncio
 import json
-import re
-import subprocess
+import os
 import shutil
 import sys
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
 from ..agent import Agent
 from ..provider.provider import LLMProvider
 
-APP_DIR_NAME = ".owibot"
-OPENAI_BASE = "https://api.openai.com/v1"
-DEFAULT_CONFIG = {"api_base": OPENAI_BASE, "model": "gpt-4o-mini", "api_key": ""}
-SPEC_PROVIDERS = [
-    {"name": "lmstudio", "api_base": "http://127.0.0.1:1234/v1", "probe": "http://127.0.0.1:1234/v1/models", "root": "data", "field": "id"},
-    {"name": "ollama", "api_base": "http://127.0.0.1:11434/v1", "probe": "http://127.0.0.1:11434/api/tags", "root": "models", "field": "name"},
-]
-DETECTED_LOCAL_MODELS_MSG = "Detected local models:"
-SELECT_PROMPT_TMPL = "Select model [1-{count}] (default 1): "
-SELECT_PROVIDER_PROMPT_TMPL = "Select provider [1-{count}] (default 1): "
-INVALID_SELECTION_MSG = "Invalid selection. Enter a number from the list."
+CONFIG_DIR_NAME = ".owibot"
+DEFAULT_API_BASE = "https://api.openai.com/v1"
+DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_CONFIG = {
+    "api_base": DEFAULT_API_BASE,
+    "model": DEFAULT_MODEL,
+    "api_key": "",
+}
 
-def _pick(*values: object) -> str:
-    for v in values:
-        if isinstance(v, str) and v.strip(): return v.strip()
-    return ""
 
-def _section(title: str) -> None: print(f"\n=== {title} ===")
-def app_home() -> Path: return (Path.home() / APP_DIR_NAME).expanduser().resolve()
-def _clear_screen() -> None: print("\033[2J\033[H", end="")
+def app_home() -> Path:
+    return (Path.home() / CONFIG_DIR_NAME).expanduser().resolve()
+
 
 def write_config(path: Path, config: dict) -> None:
-    tmp = path.with_suffix(".json.tmp"); tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); tmp.replace(path)
+    temp_path = path.with_suffix(".json.tmp")
+    serialized = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+    temp_path.write_text(serialized, encoding="utf-8")
+    temp_path.replace(path)
 
-def fetch_json(url: str, timeout: float = 1.0) -> dict:
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url=url, method="GET"), timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-def discover_codex_models() -> list[tuple[str, str, str]]:
-    try:
-        p = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=2)
-        if p.returncode != 0: return []
-    except Exception:
-        return []
-    models: set[str] = set()
-    cache = (Path.home() / ".codex" / "models_cache.json").expanduser()
-    if cache.exists():
-        try:
-            data = json.loads(cache.read_text(encoding="utf-8"))
-            for m in data.get("models", []) if isinstance(data, dict) else []:
-                if not isinstance(m, dict): continue
-                slug = _pick(m.get("slug"))
-                if slug: models.add(slug)
-        except Exception:
-            pass
-    cfg = (Path.home() / ".codex" / "config.toml").expanduser()
-    if cfg.exists():
-        try:
-            text = cfg.read_text(encoding="utf-8")
-            models.update(m.strip() for m in re.findall(r'^\s*model\s*=\s*["\']([^"\']+)["\']', text, flags=re.M) if m.strip())
-        except Exception:
-            pass
-    if not models: models.add("gpt-5")
-    return [("codex", m, "codex") for m in sorted(models)]
-
-def discover_models() -> list[tuple[str, str, str]]:
-    out: list[tuple[str, str, str]] = []
-    for p in SPEC_PROVIDERS:
-        name, base, probe = _pick(p.get("name")), _pick(p.get("api_base")), _pick(p.get("probe"))
-        root, field = _pick(p.get("root")), _pick(p.get("field"))
-        if not (name and base and probe and root and field): continue
-        for item in fetch_json(probe).get(root, []):
-            model = _pick(item.get(field)) if isinstance(item, dict) else ""
-            if model: out.append((base, model, name))
-    out.extend(discover_codex_models())
-    items = sorted(set(out), key=lambda x: (x[2], x[1].lower()))
-    codex = sorted([x for x in items if x[2] == "codex"], key=lambda x: x[1].lower(), reverse=True)
-    return [x for x in items if x[2] != "codex"] + codex
-
-def choose_model(options: list[tuple[str, str, str]]) -> Optional[tuple[str, str]]:
-    _section("Onboarding 1/2: Model Selection")
-    if not options: print("No local models detected. Keeping current model settings."); return None
-    grouped: dict[str, list[tuple[str, str, str]]] = {}
-    for item in options: grouped.setdefault(item[2], []).append(item)
-    providers = sorted(grouped.keys(), key=lambda p: (p != "codex", p))
-    print("Detected providers:")
-    for i, p in enumerate(providers, start=1): print(f"  [{i}] {p} ({len(grouped[p])} models)")
-    print("Pick a provider number, or press Enter for default [1].")
-    selected_provider = providers[0]
-    while True:
-        try: raw = input(SELECT_PROVIDER_PROMPT_TMPL.format(count=len(providers))).strip()
-        except EOFError: print(); break
-        if not raw: break
-        if raw.isdigit() and 1 <= int(raw) <= len(providers): selected_provider = providers[int(raw) - 1]; break
-        print(INVALID_SELECTION_MSG)
-    models = grouped[selected_provider]
-    print(f"\n{DETECTED_LOCAL_MODELS_MSG} ({selected_provider})")
-    for i, (_, model, _) in enumerate(models, start=1): print(f"  [{i}] {model}")
-    print("Pick a model number, or press Enter for default [1].")
-    while True:
-        try: raw = input(SELECT_PROMPT_TMPL.format(count=len(models))).strip()
-        except EOFError: print(); return models[0][:2]
-        if not raw: return models[0][:2]
-        if raw.isdigit() and 1 <= int(raw) <= len(models): return models[int(raw) - 1][:2]
-        print(INVALID_SELECTION_MSG)
-
-def apply_onboarding_defaults(config: dict, interactive_setup: bool) -> None:
-    options = discover_models(); selected = choose_model(options) if interactive_setup and options else (options[0][:2] if options else None)
-    if selected:
-        config["api_base"], config["model"] = selected
-        config["api_key"] = _pick(config.get("api_key"), "local")
-
-def _split_csv(raw: str) -> list[str]: return [p.lstrip("@") for p in (x.strip() for x in raw.split(",")) if p]
-def _keep_channels(config: dict, channels: dict) -> None:
-    if channels: config["channels"] = channels
-
-def apply_telegram_onboarding(config: dict, interactive_setup: bool) -> None:
-    channels = config.get("channels") if isinstance(config.get("channels"), dict) else {}
-    telegram = channels.get("telegram") if isinstance(channels.get("telegram"), dict) else {}
-    current_token = _pick(telegram.get("token"))
-    current_allow = telegram.get("allow_from") if isinstance(telegram.get("allow_from"), list) else []
-    if not interactive_setup: _keep_channels(config, channels); return
-
-    _section("Onboarding 2/2: Gateway Setup")
-    print("Configure Telegram now, or type 'skip' to skip for now.")
-    try: raw_token = input(f"Telegram bot token [{current_token or 'YOUR_BOT_TOKEN'}]: ").strip()
-    except EOFError: print(); raw_token = ""
-    if raw_token.lower() == "skip": _keep_channels(config, channels); return
-    token = raw_token or current_token
-    if not token: print("Skipping Telegram setup: token is required."); _keep_channels(config, channels); return
-    if raw_token and raw_token != current_token: print("Token updated")
-
-    default_allow = ",".join(str(v).lstrip("@") for v in current_allow)
-    try: raw_allow = input(f"Telegram allowlist CSV (ids/usernames or * ) [{default_allow or 'YOUR_TELEGRAM_USER_ID'}]: ").strip()
-    except EOFError: print(); raw_allow = ""
-    if raw_allow.lower() == "skip":
-        if raw_token and token and current_allow:
-            channels["telegram"] = {"token": token, "allow_from": [str(v).lstrip("@") for v in current_allow if str(v).strip()]}
-            config["channels"] = channels; print("Allowlist unchanged; saved updated token."); return
-        _keep_channels(config, channels); return
-
-    allow = _split_csv(raw_allow) if raw_allow else [str(v).lstrip("@") for v in current_allow if str(v).strip()]
-    if not allow: print("Skipping Telegram setup: allowlist is required."); _keep_channels(config, channels); return
-    channels["telegram"] = {"token": token, "allow_from": allow}; config["channels"] = channels
-    print("Telegram gateway settings saved.")
-
-def _load_existing_config(path: Path) -> Optional[dict]:
-    if not path.exists(): return None
-    raw = path.read_text(encoding="utf-8").strip()
-    if not raw: print(f"Config file is empty, regenerating: {path}"); return None
-    try:
-        loaded = json.loads(raw)
-        return loaded if isinstance(loaded, dict) else None
-    except json.JSONDecodeError:
-        print(f"Invalid config JSON, regenerating: {path}")
-        return None
-
-def ensure_global_config(interactive_setup: bool = False) -> Path:
-    home = app_home(); home.mkdir(parents=True, exist_ok=True)
-    path = home / "config.json"
-    if isinstance(_load_existing_config(path), dict): return path
-    config = dict(DEFAULT_CONFIG); apply_onboarding_defaults(config, interactive_setup)
-    write_config(path, config); print(f"Initialized config: {path}")
-    return path
 
 def load_config(path: Path) -> dict:
-    if not path.exists(): raise RuntimeError(f"Missing config file: {path}")
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(loaded, dict): raise RuntimeError(f"Invalid config format: {path}")
-    if not _pick(loaded.get("api_base")): raise RuntimeError(f"Missing required config key: api_base ({path})")
-    if not _pick(loaded.get("model")): raise RuntimeError(f"Missing required config key: model ({path})")
-    return loaded
+    if not path.exists():
+        raise RuntimeError(f"File konfigurasi tidak ditemukan: {path}")
+
+    try:
+        content = path.read_text(encoding="utf-8")
+        data = json.loads(content)
+    except (json.JSONDecodeError, OSError) as err:
+        raise RuntimeError(f"Format konfigurasi tidak valid ({path}): {err}") from err
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Format konfigurasi harus berupa JSON object: {path}")
+
+    if not str(data.get("api_base", "")).strip():
+        raise RuntimeError(f"Kunci konfigurasi 'api_base' wajib diisi di {path}")
+    if not str(data.get("model", "")).strip():
+        raise RuntimeError(f"Kunci konfigurasi 'model' wajib diisi di {path}")
+
+    return data
+
+
+def ensure_global_config() -> Path:
+    directory = app_home()
+    directory.mkdir(parents=True, exist_ok=True)
+    config_file = directory / "config.json"
+
+    if config_file.exists():
+        try:
+            content = config_file.read_text(encoding="utf-8").strip()
+            if content:
+                json.loads(content)
+                return config_file
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    write_config(config_file, dict(DEFAULT_CONFIG))
+    return config_file
+
 
 def get_secret(config: dict) -> str:
-    if _pick(config.get("api_base")) == "codex": return _pick(config.get("api_key"))
-    value = _pick(config.get("api_key"))
-    if value: return value
-    raise RuntimeError("Missing secret: api_key (set in config.json)")
+    if str(config.get("api_base", "")).strip().lower() == "codex":
+        return str(config.get("api_key", "")).strip()
+
+    key = str(config.get("api_key", "")).strip()
+    if key:
+        return key
+    raise RuntimeError("Kunci 'api_key' belum diisi di konfigurasi.")
+
 
 def ensure_workspace_layout() -> Path:
     workspace = (app_home() / "workspace").resolve()
-    for p in (workspace, workspace / "projects", workspace / "memory", workspace / "memory" / "history", workspace / "cron", workspace / "skills"):
-        p.mkdir(parents=True, exist_ok=True)
-    prompts = (Path(__file__).resolve().parent.parent / "prompts")
-    for src_name, dst_name in (("AGENTS.md", "AGENTS.md"),):
-        src, dst = prompts / src_name, workspace / dst_name
-        if src.exists() and not dst.exists(): shutil.copyfile(src, dst)
-    mem_src = prompts / "MEMORY.md"
-    mem_dst = workspace / "memory" / "MEMORY.md"
-    if mem_src.exists() and not mem_dst.exists(): shutil.copyfile(mem_src, mem_dst)
-    builtin_skills = (Path(__file__).resolve().parent.parent / "skills")
-    for d in builtin_skills.iterdir() if builtin_skills.exists() else []:
-        src = d / "SKILL.md"
-        if not d.is_dir() or not src.exists(): continue
-        dst = workspace / "skills" / d.name / "SKILL.md"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if not dst.exists(): shutil.copyfile(src, dst)
+    for sub in ("projects", "memory", "memory/history", "cron", "skills"):
+        (workspace / sub).mkdir(parents=True, exist_ok=True)
+
+    prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+    for filename in ("AGENTS.md",):
+        src = prompts_dir / filename
+        dst = workspace / filename
+        if src.is_file() and not dst.exists():
+            shutil.copyfile(src, dst)
+
+    memory_src = prompts_dir / "MEMORY.md"
+    memory_dst = workspace / "memory" / "MEMORY.md"
+    if memory_src.is_file() and not memory_dst.exists():
+        shutil.copyfile(memory_src, memory_dst)
+
+    builtin_skills = Path(__file__).resolve().parent.parent / "skills"
+    if builtin_skills.exists():
+        for skill_dir in builtin_skills.iterdir():
+            skill_file = skill_dir / "SKILL.md"
+            if skill_dir.is_dir() and skill_file.is_file():
+                dest_dir = workspace / "skills" / skill_dir.name
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest_file = dest_dir / "SKILL.md"
+                if not dest_file.exists():
+                    shutil.copyfile(skill_file, dest_file)
+
     return workspace
 
-def build_agent_from_config(config: dict) -> Agent:
-    workspace = ensure_workspace_layout()
-    return Agent(workspace=workspace, llm=LLMProvider(model=_pick(config.get("model")), api_key=get_secret(config), base_url=_pick(config.get("api_base")), cwd=str(workspace)))
 
-def build_agent() -> Agent:
-    interactive = len(sys.argv) == 1 and sys.stdin.isatty() and sys.stdout.isatty()
-    return build_agent_from_config(load_config(ensure_global_config(interactive_setup=interactive)))
+def build_agent_from_config(config: dict, chat_id: str = "default") -> Agent:
+    workspace = ensure_workspace_layout()
+    model_name = str(config.get("model", "")).strip()
+    api_key = get_secret(config)
+    api_base = str(config.get("api_base", "")).strip()
+
+    from ..mcp import MCPManager
+    from ..observability import configure_logging
+
+    configure_logging(app_home() / "owibot.log")
+
+    mcp_mgr: MCPManager | None = None
+    if config.get("mcp_servers"):
+        mcp_mgr = MCPManager()
+        mcp_mgr.load_from_config(config, cwd=str(workspace))
+
+    return Agent(
+        workspace=workspace,
+        llm=LLMProvider(
+            model=model_name,
+            api_key=api_key,
+            base_url=api_base,
+            cwd=str(workspace),
+        ),
+        chat_id=chat_id,
+        mcp_manager=mcp_mgr,
+    )
+
 
 def _parse_telegram_settings(config: dict) -> tuple[bool, str, list[str]]:
     channels = config.get("channels") if isinstance(config.get("channels"), dict) else {}
     telegram = channels.get("telegram") if isinstance(channels.get("telegram"), dict) else {}
-    token = _pick(telegram.get("token"))
-    allow_from = [str(v).lstrip("@") for v in telegram.get("allow_from", [])] if isinstance(telegram.get("allow_from"), list) else []
+    token = str(telegram.get("token", "")).strip()
+    raw_allow = telegram.get("allow_from", [])
+    allow_from = [
+        str(v).lstrip("@").strip()
+        for v in (raw_allow if isinstance(raw_allow, list) else [])
+        if str(v).strip()
+    ]
     return bool(telegram), token, allow_from
+
 
 def run_gateway_command(args: list[str] | None = None) -> int:
     from .daemon import is_running, start_detached, stop
+
     args = args or []
     if "--stop" in args:
-        print(stop(app_home())); return 0
-    config = load_config(ensure_global_config(interactive_setup=False))
-    enabled, token, allow_from = _parse_telegram_settings(config)
-    if not enabled: print("Telegram is disabled. Add channels.telegram in ~/.owibot/config.json or run `owibot setup`."); return 1
-    if not token: print("Missing Telegram token. Set channels.telegram.token or run `owibot setup`."); return 1
-    if not allow_from: print("Missing Telegram allowlist. Set channels.telegram.allow_from to ['*'] or specific user IDs/usernames, or run `owibot setup`."); return 1
+        print(stop(app_home()))
+        return 0
+
+    config = load_config(ensure_global_config())
+    is_enabled, token, allow_from = _parse_telegram_settings(config)
+
+    if not is_enabled:
+        print("Telegram belum diaktifkan. Jalankan `owibot setup` terlebih dahulu.")
+        return 1
+    if not token:
+        print("Token bot Telegram belum diisi. Jalankan `owibot setup`.")
+        return 1
+    if not allow_from:
+        print("Allowlist Telegram belum diisi. Jalankan `owibot setup`.")
+        return 1
+
     if "--fg" not in args and "--fg-child" not in args:
         try:
-            pid, log = start_detached(app_home())
+            pid, log_file = start_detached(app_home())
         except RuntimeError as err:
-            print(f"Gateway: {err}"); return 1
-        print(f"OwiBot gateway running in background (pid {pid}).\nLog: {log}\nStop: owibot gateway --stop")
+            print(f"Gateway: {err}")
+            return 1
+        print(f"OwiBot gateway berjalan di background (PID: {pid}).\nLog: {log_file}\nStop: owibot gateway --stop")
         return 0
+
     if "--fg-child" not in args and (pid := is_running(app_home())) is not None:
-        print(f"Gateway already running in background (pid {pid}). Stop it first: owibot gateway --stop"); return 1
-    try: from ..channels import TelegramGateway, TelegramSettings
-    except Exception as err: print(f"Telegram dependency missing: {err}"); print("Install python-telegram-bot>=22,<23"); return 1
-    gateway = TelegramGateway(settings=TelegramSettings(token=token, allow_from=allow_from), agent_factory=lambda: build_agent_from_config(config), cron_path=(app_home() / "workspace" / "cron" / "cron.json"))
-    print("OwiBot gateway started (Telegram). Press Ctrl+C to stop.")
-    try: asyncio.run(gateway.run_forever())
-    except KeyboardInterrupt: print("\nOwiBot gateway stopped.")
+        print(f"Gateway sudah berjalan di background (PID: {pid}). Hentikan terlebih dahulu: owibot gateway --stop")
+        return 1
+
+    try:
+        from ..channels import TelegramGateway, TelegramSettings
+    except ImportError as err:
+        print(f"Dependensi Telegram tidak ditemukan: {err}")
+        return 1
+
+    cron_file = app_home() / "workspace" / "cron" / "cron.json"
+    gateway = TelegramGateway(
+        settings=TelegramSettings(token=token, allow_from=allow_from),
+        agent_factory=lambda cid="default": build_agent_from_config(config, chat_id=cid),
+        cron_path=cron_file,
+    )
+
+    print("OwiBot gateway aktif (Telegram). Tekan Ctrl+C untuk berhenti.")
+    try:
+        asyncio.run(gateway.run_forever())
+    except KeyboardInterrupt:
+        print("\nOwiBot gateway dihentikan.")
     return 0
 
-def run_onboard_command() -> int:
-    path = ensure_global_config(interactive_setup=False); config = load_config(path)
-    interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    apply_onboarding_defaults(config, interactive); apply_telegram_onboarding(config, interactive)
-    ensure_workspace_layout()
-    write_config(path, config); print(f"\nOnboarding completed: {path}")
-    return 0
 
 def run_setup_command() -> int:
-    from .setup_wizard import run_wizard
-    path = ensure_global_config(interactive_setup=False)
+    from .setup_wizard import run_setup_flags, run_wizard
+
+    config_path = ensure_global_config()
     try:
-        config = load_config(path)
+        config = load_config(config_path)
     except RuntimeError:
         config = dict(DEFAULT_CONFIG)
+
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    if not interactive and len(sys.argv) <= 2:
-        print("Non-interactive shell: running quick onboard instead (no prompts).")
-        return run_onboard_command()
-    if any(a.startswith("--") for a in sys.argv[2:]):
-        from .setup_wizard import run_setup_flags
-        if "--help-flags" in sys.argv[2:]:
-            print("owibot setup [flags]: --api-base URL --api-key KEY --model MODEL\n"
-                  "  --token TOK --allow ID1,ID2 [--mem-gate] [--skills-gate] [--force] --yes")
+    extra_args = sys.argv[2:]
+
+    if any(arg.startswith("--") for arg in extra_args):
+        if "--help-flags" in extra_args:
+            print(
+                "owibot setup [flags]:\n"
+                "  --api-base URL    Endpoint LLM\n"
+                "  --api-key KEY     API key provider\n"
+                "  --model MODEL     Nama model\n"
+                "  --token TOK       Token bot Telegram\n"
+                "  --allow ID1,ID2   User ID Telegram (allowlist)\n"
+                "  --yes             Konfirmasi penyimpanan"
+            )
             return 0
         try:
-            config = run_setup_flags(config, sys.argv[2:])
+            config = run_setup_flags(config, extra_args)
         except RuntimeError as err:
-            print(f"Setup: {err}"); return 1
+            print(f"Setup gagal: {err}")
+            return 1
+
         ensure_workspace_layout()
-        write_config(path, config); print(f"\nSetup completed: {path}")
+        write_config(config_path, config)
+        print(f"\nKonfigurasi berhasil disimpan: {config_path}")
         return 0
+
+    if not interactive:
+        print("Terminal non-interaktif terdeteksi. Gunakan `owibot setup --help-flags` untuk parameter langsung.")
+        return 1
+
     try:
         config = run_wizard(config)
     except RuntimeError as err:
-        print(f"Setup: {err}"); return 1
+        print(f"Setup dibatalkan: {err}")
+        return 1
+
     ensure_workspace_layout()
-    write_config(path, config); print(f"\nSetup completed: {path}")
-    print("Next: `owibot gateway` to start the Telegram bot, or `owibot` to chat in CLI.")
+    write_config(config_path, config)
+    print(f"\nKonfigurasi berhasil disimpan: {config_path}")
+    print("Langkah selanjutnya: jalankan `owibot gateway` untuk memulai bot.")
     return 0
+
 
 def run_service_command(args: list[str]) -> int:
     from .service import install, status, uninstall
+
     action = (args[0] if args else "status").lower()
     try:
         if action == "install":
@@ -297,49 +274,70 @@ def run_service_command(args: list[str]) -> int:
         else:
             print(status())
     except RuntimeError as err:
-        print(f"Service error: {err}"); return 1
+        print(f"Layanan autostart error: {err}")
+        return 1
     return 0
+
 
 def run_doctor_command() -> int:
     from . import ui
-    print(ui.banner("diagnostics"))
-    print(f"  python   : {sys.version.split()[0]} ({sys.executable})")
-    print(f"  console  : stdin_tty={sys.stdin.isatty()} stdout_tty={sys.stdout.isatty()} "
-          f"encoding={getattr(sys.stdout, 'encoding', '?')}")
+
+    print(ui.banner("diagnosa sistem"))
+    print(f"  Python   : {sys.version.split()[0]} ({sys.executable})")
+    print(f"  Console  : stdin_tty={sys.stdin.isatty()} stdout_tty={sys.stdout.isatty()} encoding={getattr(sys.stdout, 'encoding', '?')}")
+
     try:
-        cfg = load_config(ensure_global_config(interactive_setup=False))
-        print(f"  config   : {ui.green('OK')} - {cfg.get('model')} @ {cfg.get('api_base')}")
-        tg = ((cfg.get("channels") or {}).get("telegram") or {})
-        print(f"  telegram : {'configured' if tg.get('token') else 'not configured'}")
+        config = load_config(ensure_global_config())
+        print(f"  Config   : {ui.green('OK')} ({config.get('model')} @ {config.get('api_base')})")
+        is_enabled, token, allow_list = _parse_telegram_settings(config)
+        print(f"  Telegram : {'Terkonfigurasi' if (is_enabled and token) else 'Belum terkonfigurasi'}")
+        mcp_count = len(config.get("mcp_servers", {})) if isinstance(config.get("mcp_servers"), dict) else 0
+        print(f"  MCP      : {mcp_count} server terkonfigurasi")
     except RuntimeError as err:
-        print(f"  config   : {ui.red(str(err))}")
-    print(f"  service  : {'on' if _service_on() else 'off'} (owibot service install)")
+        print(f"  Config   : {ui.red(str(err))}")
+
+    try:
+        from .service import bat_path
+        service_active = bat_path().exists()
+    except Exception:
+        service_active = False
+
+    print(f"  Service  : {'Aktif' if service_active else 'Tidak aktif'} (jalankan `owibot service install` untuk memasang)")
     return 0
 
 
-def _service_on() -> bool:
-    try:
-        from .service import bat_path
-        return bat_path().exists()
-    except Exception:
-        return False
+def print_usage() -> None:
+    from . import ui
+
+    icon = ui.uni(chr(0x25C9), "*")
+    print(f"{ui.green(icon + ' owibot')} - Asisten AI Telegram")
+    print("  owibot setup               Konfigurasi terpandu (LLM & Telegram)")
+    print("  owibot setup --help-flags  Daftar parameter setup non-interaktif")
+    print("  owibot gateway             Jalankan gateway bot di background")
+    print("  owibot gateway --fg        Jalankan gateway di foreground")
+    print("  owibot gateway --stop      Hentikan gateway background")
+    print("  owibot service install     Pasang autostart saat login Windows")
+    print("  owibot doctor              Periksa status sistem dan konfigurasi")
+
 
 def main() -> None:
-    if len(sys.argv) >= 2 and sys.argv[1] == "doctor": run_doctor_command(); return
-    if len(sys.argv) >= 2 and sys.argv[1] == "onboard": run_onboard_command(); return
-    if len(sys.argv) >= 2 and sys.argv[1] == "setup": run_setup_command(); return
-    if len(sys.argv) >= 2 and sys.argv[1] == "gateway": run_gateway_command(sys.argv[2:]); return
-    if len(sys.argv) >= 2 and sys.argv[1] == "service": run_service_command(sys.argv[2:]); return
-    try: agent = build_agent()
-    except RuntimeError as err: print(f"Config error: {err}"); print(f"Set api_key in {app_home() / 'config.json'}." ); return
-    if len(sys.argv) > 1: print(agent.ask(" ".join(sys.argv[1:]))); return
-    if sys.stdout.isatty(): _clear_screen()
-    print("OwiBot ready. Type 'exit' to quit.")
-    while True:
-        try: text = input("> ").strip()
-        except EOFError: print(); break
-        if not text: continue
-        if text.lower() in {"exit", "quit"}: break
-        print(agent.ask(text))
+    subcommand = sys.argv[1].lower() if len(sys.argv) >= 2 else ""
 
-if __name__ == "__main__": main()
+    if subcommand == "doctor":
+        run_doctor_command()
+        return
+    if subcommand in {"setup", "onboard"}:
+        run_setup_command()
+        return
+    if subcommand == "gateway":
+        run_gateway_command(sys.argv[2:])
+        return
+    if subcommand == "service":
+        run_service_command(sys.argv[2:])
+        return
+
+    print_usage()
+
+
+if __name__ == "__main__":
+    main()

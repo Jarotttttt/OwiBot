@@ -79,7 +79,7 @@ def test_test_chat_mocked():
         try:
             wiz.test_chat("http://x/v1", "k", "m")
         except RuntimeError as e:
-            assert "chat test failed" in str(e)
+            assert ("Gagal uji" in str(e)) or ("chat test failed" in str(e))
         else:
             raise AssertionError("expected RuntimeError")
 
@@ -103,6 +103,6 @@ def test_check_telegram_mocked():
         try:
             wiz.check_telegram("bad")
         except RuntimeError as e:
-            assert "rejected" in str(e)
+            assert ("menolak" in str(e)) or ("rejected" in str(e))
         else:
             raise AssertionError("expected RuntimeError")

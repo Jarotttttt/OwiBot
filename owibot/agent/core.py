@@ -1,58 +1,173 @@
 from __future__ import annotations
+
 import json
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
+
+from .lifecycle import AgentLifecycleEngine, AgentPhase
 from .memory import MemoryStore
-from .skills import SkillsLoader
+from .skills import SkillsEngine
 from .tools import TOOLS, LocalTools
+from ..mcp import MCPManager
+from ..observability import AgentTracer
+from ..provider.base import LLMResponse, TokenUsage
 from ..provider.provider import LLMProvider
 
-PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "AGENTS.md"
+BASE_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "AGENTS.md"
+MAX_DELEGATION_DEPTH = 1
 
-def _load_rules(primary: Path, fallback: Path) -> str:
-    for p in (primary, fallback):
-        try: text = p.read_text(encoding="utf-8").strip()
-        except OSError: continue
-        if text: return text
-    raise RuntimeError(f"Missing or unreadable prompt file: {primary} (fallback: {fallback})")
+
+def _read_prompt_instructions(primary_path: Path, fallback_path: Path) -> str:
+    for path in (primary_path, fallback_path):
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return content
+        except OSError:
+            continue
+    raise RuntimeError(f"File prompt dasar tidak ditemukan di {primary_path} maupun {fallback_path}")
+
+
+def format_tool_progress(name: str, args: dict) -> str:
+    if name == "exec":
+        cmd = str(args.get("command", "")).strip()
+        return f"⚡ Menjalankan: `{cmd[:45]}`"
+    if name == "read_file":
+        path = str(args.get("path", "")).strip()
+        return f"📖 Membaca file: `{path}`"
+    if name == "write_file":
+        path = str(args.get("path", "")).strip()
+        return f"✍️ Menulis file: `{path}`"
+    if name == "web_fetch":
+        url = str(args.get("url", "")).strip()
+        return f"🌐 Mengunduh: `{url[:45]}`"
+    if name == "list_dir":
+        path = str(args.get("path", ".")).strip()
+        return f"📁 Melihat folder: `{path}`"
+    if name == "update_memory":
+        return "🧠 Memperbarui memori..."
+    if name == "session_search":
+        q = str(args.get("query", "")).strip()
+        return f"🔍 Mencari sesi lalu: `{q[:35]}`"
+    if name == "skill_view":
+        sname = str(args.get("name", "")).strip()
+        return f"📚 Membaca skill: `{sname}`"
+    if name == "skill_manage":
+        act = str(args.get("action", "")).strip()
+        return f"🛠️ Mengelola skill ({act})..."
+    if name == "delegate_task":
+        task = str(args.get("task", "")).strip()
+        return f"👥 Mendelegasikan ke subagent: `{task[:35]}`"
+    if name == "cron_job":
+        return "⏰ Mengatur pengingat..."
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        srv = parts[1] if len(parts) > 1 else "mcp"
+        tname = parts[2] if len(parts) > 2 else name
+        return f"🔌 MCP ({srv}): `{tname}`"
+    return f"⚙️ Menjalankan tool: `{name}`"
+
 
 class Agent:
-    def __init__(self, workspace: Path, llm: LLMProvider):
-        self.workspace, self.llm = workspace, llm
-        self.memory, self.skills = MemoryStore(workspace), SkillsLoader(workspace)
+    def __init__(
+        self,
+        workspace: Path,
+        llm: LLMProvider,
+        chat_id: str = "default",
+        depth: int = 0,
+        mcp_manager: MCPManager | None = None,
+        tracer: AgentTracer | None = None,
+    ):
+        self.workspace = workspace
+        self.llm = llm
+        self.chat_id = chat_id
+        self.depth = depth
+        self.mcp_manager = mcp_manager
+        self.tracer = tracer or AgentTracer(chat_id=chat_id)
+
+        self.memory = MemoryStore(workspace)
+        self.skills = SkillsEngine(workspace)
         self.tools = LocalTools(workspace)
-        self.workspace_prompt_path = (workspace / "AGENTS.md").resolve()
-        self.skill_summary = "; ".join(f"{n}: {str((self.skills.get_skill_metadata(n) or {}).get('description', '')).strip() or 'no description'}" for n in (s["name"] for s in self.skills.list_skills()))
-        self.skills_text = self.skills.load_skills_for_context(self.skills.get_always_skills())
-        self.recent: list[dict] = []; self.max_steps = 30
+        self.tools.set_subagent_runner(self._spawn_subagent)
+        self.lifecycle = AgentLifecycleEngine(self)
 
-    def _build_messages(self, user_text: str, created_at_iso: str = "") -> list[dict]:
-        parts = [_load_rules(self.workspace_prompt_path, PROMPT_PATH), "## Memory files\n- long-term: memory/MEMORY.md\n- history: memory/history/YYYY-MM-DD.jsonl"]
-        recalled = self.memory.search_history(user_text, k=5)
-        if self.skills_text: parts.append("## Skills\n" + self.skills_text)
-        if (text := self.memory.read_memory().strip()): parts.append("## Long-term memory\n" + text)
-        if recalled: parts.append("## Relevant history\n" + "\n\n".join(recalled))
-        system = "\n\n---\n\n".join(parts) + (f"\n\n## Skill Discovery\n- available: {self.skill_summary}" if self.skill_summary else "") + (f"\n\n## Runtime\n- created_at_iso: {created_at_iso}" if created_at_iso else "")
-        return [{"role": "system", "content": system}, *self.recent[-10:], {"role": "user", "content": user_text}]
+        self.workspace_prompt_file = (workspace / "AGENTS.md").resolve()
+        self.recent_history: list[dict] = []
+        self.max_steps: int = 30
+        self.last_plan: list[Any] = []
+        self.last_lifecycle_state: Any = None
 
-    def ask(self, user_text: str, context: dict | None = None) -> str:
-        created_at_iso = datetime.now().astimezone().replace(microsecond=0).isoformat()
-        tool_ctx = {**(context or {}), "created_at_iso": created_at_iso}
-        is_cron = bool(tool_ctx.get("is_cron"))
-        self.tools.set_context(tool_ctx)
-        messages = self._build_messages(f"[Scheduled Task] Timer finished.\nInstruction: {user_text.strip()}." if is_cron else user_text, created_at_iso=created_at_iso)
-        final = ""
+        skill_entries: list[str] = []
+        for item in self.skills.list_skills():
+            meta = self.skills.get_skill_metadata(item["name"]) or {}
+            desc = meta.get("description", "").strip() or "Tidak ada deskripsi"
+            skill_entries.append(f"{item['name']}: {desc}")
 
-        for _ in range(self.max_steps):
-            resp = self.llm.chat(messages, tools=TOOLS)
-            if not resp["tool_calls"]:
-                final = (resp["text"] or "").strip() or "(empty response)"
-                messages.append({"role": "assistant", "content": final}); break
-            messages.append({"role": "assistant", "content": resp["text"] or "", "tool_calls": [{"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}} for tc in resp["tool_calls"]]})
-            for tc in resp["tool_calls"]:
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "name": tc["name"], "content": self.tools.dispatch(tc["name"], tc["arguments"])[:5000]})
+        self.available_skills_summary = "; ".join(skill_entries)
+        self.always_active_skills = self.skills.load_skills_for_context(self.skills.get_always_skills())
 
-        if not final: final = "I couldn't finish this in one pass (too many tool steps). Please try again with a more specific request."
-        self.recent = [*self.recent, {"role": "user", "content": user_text}, {"role": "assistant", "content": final}][-10:]
-        self.memory.append_turn(user_text, final)
-        return final
+    def _spawn_subagent(self, task_description: str, budget: int = 5) -> str:
+        if self.depth >= MAX_DELEGATION_DEPTH:
+            return "ERROR: Delegasi subagent bersarang dilarang (maksimum kedalaman tercapai)."
+
+        subagent = Agent(
+            workspace=self.workspace,
+            llm=self.llm,
+            chat_id=f"{self.chat_id}:subagent",
+            depth=self.depth + 1,
+            mcp_manager=self.mcp_manager,
+            tracer=self.tracer,
+        )
+        subagent.max_steps = max(2, min(budget, 8))
+        return subagent.ask(task_description)
+
+    def get_available_tools(self) -> list[dict]:
+        tools_catalog = list(TOOLS)
+        if self.mcp_manager:
+            tools_catalog.extend(self.mcp_manager.cached_tools)
+        return tools_catalog
+
+    def dispatch_tool(self, name: str, arguments: dict) -> str:
+        if self.mcp_manager and self.mcp_manager.is_mcp_tool(name):
+            return self.mcp_manager.dispatch(name, arguments)
+        return self.tools.dispatch(name, arguments)
+
+    def _assemble_prompt(self, user_message: str, timestamp_iso: str = "") -> list[dict]:
+        sections: list[str] = [
+            _read_prompt_instructions(self.workspace_prompt_file, BASE_PROMPT_PATH),
+            "## Berkas Memori\n- Memori utama: memory/MEMORY.md\n- Profil pengguna: memory/USER.md\n- Log percakapan: memory/history/YYYY-MM-DD.jsonl",
+        ]
+
+        if self.always_active_skills:
+            sections.append(f"## Skills Aktif\n{self.always_active_skills}")
+
+        user_profile = self.memory.read_user_profile().strip()
+        if user_profile:
+            sections.append(f"## Profil Pengguna\n{user_profile}")
+
+        saved_memory = self.memory.read_memory().strip()
+        if saved_memory:
+            sections.append(f"## Catatan Memori\n{saved_memory}")
+
+        relevant_history = self.memory.search_history(user_message, limit=5, chat_id=self.chat_id)
+        if relevant_history:
+            sections.append("## Riwayat Percakapan Relevan\n" + "\n\n".join(relevant_history))
+
+        system_instruction = "\n\n---\n\n".join(sections)
+        if self.available_skills_summary:
+            system_instruction += f"\n\n## Skills yang Tersedia (Gunakan tool skill_view untuk melihat)\n- {self.available_skills_summary}"
+        if timestamp_iso:
+            system_instruction += f"\n\n## Waktu Sistem\n- created_at: {timestamp_iso}"
+
+        messages = [{"role": "system", "content": system_instruction}]
+        messages.extend(self.recent_history[-10:])
+        messages.append({"role": "user", "content": user_message})
+        return messages
+
+    def format_tool_progress(self, name: str, args: dict) -> str:
+        return format_tool_progress(name, args)
+
+    def ask(self, user_message: str, context: dict | None = None) -> str:
+        return self.lifecycle.run(user_message, context=context)

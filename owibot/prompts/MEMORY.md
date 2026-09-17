@@ -1,3 +1,3 @@
-# MEMORY.md — Your Long‑Term Memory
+# Catatan Memori Jangka Panjang
 
-This file is long-term memory to store important information.
+File ini menyimpan preferensi pengguna, aturan tetap, dan ringkasan penting lintas percakapan.

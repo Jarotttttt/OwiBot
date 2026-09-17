@@ -1,18 +1,12 @@
 ---
 name: memory
-description: Persistent memory policy (durable, user-approved facts only).
+description: Panduan penyimpanan dan pembaruan memori jangka panjang.
 always: true
 ---
 
-Use this skill when the user asks to remember, forget, or update saved memory.
+Gunakan skill ini ketika pengguna meminta untuk mengingat informasi penting atau memperbarui profil.
 
-### Rules
-- Save only durable facts with clear future value (preferences, profile, recurring constraints).
-- Do not save secrets, tokens, passwords, private keys, or one-time/ephemeral chat details.
-- Prefer explicit user consent before adding new memory when intent is ambiguous.
-- Keep entries short, factual, and conflict-free; replace outdated facts instead of duplicating.
-
-### Update flow
-1. Read current memory (`read_file` on `memory/MEMORY.md`) when you need context.
-2. Produce a clean merged version.
-3. Persist with `update_memory` (full-file replace).
+### Aturan Penggunaan
+- Simpan informasi yang memiliki kegunaan jangka panjang (preferensi pengguna, tech stack, aturan proyek).
+- Hindari menyimpan kredensial, token, atau informasi obrolan sesaat.
+- Baca catatan saat ini terlebih dahulu jika perlu mempertahankan informasi sebelumnya, lalu perbarui menggunakan tool `update_memory`.

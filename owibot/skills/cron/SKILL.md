@@ -1,18 +1,13 @@
 ---
 name: cron
-description: Schedule, list, and remove reminders with correct one-time vs recurring behavior.
+description: Panduan pengelolaan pengingat dan tugas terjadwal.
 always: true
 ---
 
-Use this skill when handling reminders and scheduling requests.
+Gunakan skill ini saat memproses permintaan jadwal atau pengingat dari pengguna.
 
-### Rules
-- Use cron_job for scheduling.
-- One-time reminders (“in/after”, “at <time>”) → every_s=0; do not infer recurrence from duration (e.g., “after 1 minute” = one-time).
-- Recurring reminders → every_s>0 only if the user explicitly says “every”, “repeat”, or “recurring”.
-- When adding a job, pass next_at as an ISO datetime; keep confirmations concise and do not show cron IDs unless asked.
-
-### Scheduled task behavior
-- Treat the incoming text as a message when user requested.
-- Do not check/list/manage reminders unless explicitly asked.
-- Respond with the reminder content directly and concisely.
+### Aturan Penggunaan
+- Gunakan tool `cron_job` untuk menjadwalkan tugas.
+- Pengingat satu kali ("nanti jam 5", "setelah 10 menit"): isi `every_s=0` dan tentukan `next_at` dalam format ISO datetime.
+- Pengingat berulang ("setiap hari", "tiap jam"): isi `every_s` dengan interval detik yang sesuai.
+- Berikan konfirmasi yang ringkas kepada pengguna setelah tugas berhasil dijadwalkan.
