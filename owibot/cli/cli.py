@@ -360,7 +360,32 @@ def run_service_command(args: list[str]) -> int:
         print(f"Service error: {err}"); return 1
     return 0
 
+def run_doctor_command() -> int:
+    from .theme import dim
+    print("owibot doctor")
+    print(f"  python: {sys.version.split()[0]} ({sys.executable})")
+    print(f"  stdin tty: {sys.stdin.isatty()}  stdout tty: {sys.stdout.isatty()}  "
+          f"encoding: {getattr(sys.stdout, 'encoding', '?')}")
+    try:
+        import prompt_toolkit
+        print(f"  prompt_toolkit: {prompt_toolkit.__version__}")
+    except ImportError:
+        print("  prompt_toolkit: MISSING (pip install prompt_toolkit)")
+    sess = _build_prompt_session()
+    if isinstance(sess, tuple):
+        sess, reason = sess
+    else:
+        reason = ""
+    print(f"  rich prompt: {'OK' if sess else 'OFF — ' + (reason or 'unknown')}")
+    try:
+        cfg = load_config(ensure_global_config(interactive_setup=False))
+        print(f"  config: OK (model {cfg.get('model')} @ {cfg.get('api_base')})")
+    except RuntimeError as err:
+        print(f"  config: {err}")
+    return 0
+
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "doctor": run_doctor_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "onboard": run_onboard_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "setup": run_setup_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "gateway": run_gateway_command(); return
@@ -391,6 +416,10 @@ def run_chat_loop(agent: Agent) -> None:
         ("tools", "14 sandboxed"),
     ]))
     session = _build_prompt_session()
+    if isinstance(session, tuple):
+        session, reason = session
+        if reason:
+            print(dim(f"rich prompt off ({reason}) — plain input mode"))
     while True:
         try:
             text = _read_line(session)
@@ -418,17 +447,17 @@ def run_chat_loop(agent: Agent) -> None:
 
 
 def _build_prompt_session():
-    """prompt_toolkit session, or None when unavailable/non-tty (plain input)."""
+    """prompt_toolkit session, or (None, reason) when unavailable (plain input)."""
     if not sys.stdin.isatty():
-        return None
+        return None, "stdin is not a tty"
     try:
         from .prompt import build_session
-    except ImportError:
-        return None
+    except ImportError as err:
+        return None, f"prompt_toolkit missing: {err}"
     try:
-        return build_session(app_home() / "cli_history")
-    except Exception:
-        return None
+        return build_session(app_home() / "cli_history"), ""
+    except Exception as err:
+        return None, f"{type(err).__name__}: {err}"
 
 
 def _read_line(session) -> str:
