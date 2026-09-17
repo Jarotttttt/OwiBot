@@ -206,16 +206,24 @@ def ensure_workspace_layout() -> Path:
         if not dst.exists(): shutil.copyfile(src, dst)
     return workspace
 
+def _gate_flags(config: dict) -> tuple[bool, bool]:
+    mem = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+    skl = config.get("skills") if isinstance(config.get("skills"), dict) else {}
+    return bool(mem.get("write_approval")), bool(skl.get("write_approval"))
+
+
 def build_agent_from_config(config: dict) -> Agent:
     workspace = ensure_workspace_layout()
     agent = Agent(workspace=workspace, llm=LLMProvider(model=_pick(config.get("model")), api_key=get_secret(config), base_url=_pick(config.get("api_base")), cwd=str(workspace)))
     agent.tools.require_approval = False
+    agent.tools.gate_memory_writes, agent.tools.gate_skill_writes = _gate_flags(config)
     return agent
 
 def build_chat_agent(config: dict, chat_id: str = "default") -> Agent:
     """Per-chat agent: applies persisted /model override for this chat."""
     workspace = ensure_workspace_layout()
     agent = Agent(workspace=workspace, llm=LLMProvider(model=_pick(config.get("model")), api_key=get_secret(config), base_url=_pick(config.get("api_base")), cwd=str(workspace)), chat_id=chat_id)
+    agent.tools.gate_memory_writes, agent.tools.gate_skill_writes = _gate_flags(config)
     if saved := agent.memory.load_meta(chat_id, "model"):
         agent.llm.model = saved
     return agent
@@ -249,6 +257,23 @@ def cli_resolve(agent: Agent, out: str) -> str:
 
 def cli_ask(agent: Agent, text: str) -> str:
     return cli_resolve(agent, agent.ask(text))
+
+
+def cli_memory(agent: Agent, text: str) -> str:
+    raw = text[7:].strip()
+    if not raw:
+        st = agent.memory.stats(agent.chat_id)
+        return (f"MEMORY.md: {st['memory']}\nUSER.md: {st['user']}\n"
+                f"History turns: {st['turns']} (~{st['chars']} chars)")
+    return agent.memory_review(raw)
+
+
+def cli_skills(agent: Agent, text: str) -> str:
+    raw = text[7:].strip()
+    if not raw:
+        idx = agent.skills.index_text()
+        return "Installed skills:\n" + idx if idx else "No skills installed yet."
+    return agent.skills_review(raw)
 
 def build_agent() -> Agent:
     interactive = len(sys.argv) == 1 and sys.stdin.isatty() and sys.stdout.isatty()
@@ -310,6 +335,8 @@ def main() -> None:
         if text == "/undo": print(agent.undo()); continue
         if text == "/compress": print(agent.compress()); continue
         if text == "/usage": print(agent.usage()); continue
+        if text == "/memory" or text.startswith("/memory "): print(cli_memory(agent, text)); continue
+        if text == "/skills" or text.startswith("/skills "): print(cli_skills(agent, text)); continue
         if text == "/model" or text.startswith("/model "): print(agent.set_model(text[6:].strip())); continue
         print(cli_ask(agent, text))
 

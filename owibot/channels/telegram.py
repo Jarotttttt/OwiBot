@@ -26,7 +26,7 @@ class TelegramSettings:
 class TelegramGateway:
     BOT_COMMANDS = [BotCommand("start", "Show startup guide"), BotCommand("new", "Reset current chat"), BotCommand("model", "Show or change model"), BotCommand("retry", "Retry last message"), BotCommand("undo", "Remove last exchange"), BotCommand("compress", "Compress context"), BotCommand("usage", "Session + memory usage"), BotCommand("sessions", "Recent prompts in this chat"), BotCommand("memory", "Memory budgets"), BotCommand("skills", "List installed skills"), BotCommand("learn", "Save workflow as skill"), BotCommand("bg", "Run prompt in background"), BotCommand("stop", "Stop the running task"), BotCommand("help", "List command usage")]
     TXT = {
-        "help": ("Available commands:\n/new, /model [name] [--global|--once], /retry, /undo,\n/compress, /usage, /sessions, /memory, /skills,\n/learn <name> | <material>, /bg <prompt>, /stop, /help\n\nSend a voice memo and I'll transcribe it when your provider allows.\nTip: /new at task boundaries — memory pays off on fresh sessions."),
+        "help": ("Available commands:\n/new, /model [name] [--global|--once], /retry, /undo,\n/compress, /usage, /sessions, /memory [pending|approve|reject],\n/skills [pending|approve|reject|diff],\n/learn <name> | <material>, /bg <prompt>, /stop, /help\n\nSend a voice memo and I'll transcribe it when your provider allows.\nTip: /new at task boundaries — memory pays off on fresh sessions."),
         "unauth": "Unauthorized user.",
         "unauth_start": "You are not on the allowlist. Ask the owner to add your Telegram ID in channels.telegram.allow_from.",
         "start": "OwiBot gateway is online.\nUse /new to start a clean session.\nUse /help to view command usage.",
@@ -147,15 +147,23 @@ class TelegramGateway:
 
     async def _on_memory(self, update, context):
         if not await self._access(update): return
+        raw = (update.message.text or "")[7:].strip()
         agent = self._agent(str(update.message.chat_id))
-        st = agent.memory.stats(agent.chat_id)
-        await self._reply_cmd(update, f"MEMORY.md: {st['memory']}\nUSER.md: {st['user']}\nHistory turns: {st['turns']} (~{st['chars']} chars)")
+        if not raw:
+            st = agent.memory.stats(agent.chat_id)
+            await self._reply_cmd(update, f"MEMORY.md: {st['memory']}\nUSER.md: {st['user']}\nHistory turns: {st['turns']} (~{st['chars']} chars)")
+            return
+        await self._reply_cmd(update, agent.memory_review(raw))
 
     async def _on_skills(self, update, context):
         if not await self._access(update): return
+        raw = (update.message.text or "")[7:].strip()
         agent = self._agent(str(update.message.chat_id))
-        idx = agent.skills.index_text()
-        await self._reply_cmd(update, "Installed skills:\n" + idx if idx else "No skills installed yet.")
+        if not raw:
+            idx = agent.skills.index_text()
+            await self._reply_cmd(update, "Installed skills:\n" + idx if idx else "No skills installed yet.")
+            return
+        await self._reply_cmd(update, agent.skills_review(raw))
 
     async def _on_learn(self, update, context):
         if not await self._access(update): return

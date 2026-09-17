@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from .memory import MemoryStore
 from .skills import SkillsLoader
+from .staging import StagedStore
 from .tools import TOOLS, PENDING_PREFIX, LocalTools
 from ..provider.provider import LLMProvider
 
@@ -30,6 +31,8 @@ class Agent:
         self.last_user = ""
         self.session_tool_calls = 0
         self.pending: dict[str, dict] = {}
+        self.staged_memory = StagedStore(workspace / "memory" / "pending.json")
+        self.staged_skills = StagedStore(workspace / "skills" / "pending.json")
         self.tools.set_delegate_factory(self._run_subagent)
         self.freeze_snapshot()
 
@@ -155,6 +158,77 @@ class Agent:
                       chat_id=f"{self.chat_id}:sub")
         child.max_steps = budget
         return child.ask(task, {"chat_id": child.chat_id, "subagent": True})
+
+    # -- staged-write review (/memory /skills) ----------------------------
+    def _review(self, store: StagedStore, apply, raw: str, what: str) -> str:
+        parts = (raw or "").strip().split()
+        if not parts or parts[0] == "pending":
+            items = store.list()
+            if not items:
+                return f"No staged {what} writes."
+            return f"Staged {what} writes:\n" + "\n".join(
+                f"[{i['id']}] {i['gist']}" for i in items)
+        if parts[0] == "approve":
+            if len(parts) < 2:
+                return f"Usage: /{what} approve <id|all>"
+            targets = store.pop_all() if parts[1] == "all" else [store.pop(parts[1])]
+            if not targets or targets[0] is None:
+                return f"No staged entry {parts[1]}."
+            return "\n".join(apply(t) for t in targets if t)
+        if parts[0] == "reject":
+            if len(parts) < 2:
+                return f"Usage: /{what} reject <id|all>"
+            if parts[1] == "all":
+                n = len(store.pop_all())
+                return f"Rejected {n} staged {what} write(s)."
+            return f"Rejected staged entry {parts[1]}." if store.pop(parts[1]) else f"No staged entry {parts[1]}."
+        return f"Usage: /{what} [pending|approve <id|all>|reject <id|all>]"
+
+    def memory_review(self, raw: str) -> str:
+        def apply(item: dict) -> str:
+            op = item["op"]
+            try:
+                if op["action"] == "add": res = self.memory.add(op["target"], op["content"])
+                elif op["action"] == "replace": res = self.memory.replace(op["target"], op["old_text"], op["content"])
+                else: res = self.memory.remove(op["target"], op["old_text"])
+                return f"[{item['id']}] {res}"
+            except Exception as err:
+                return f"[{item['id']}] FAILED: {err}"
+        return self._review(self.staged_memory, apply, raw, "memory")
+
+    def skills_review(self, raw: str) -> str:
+        parts = (raw or "").strip().split()
+        if parts[:1] == ["diff"]:
+            if len(parts) < 2:
+                return "Usage: /skills diff <id>"
+            found = next((i for i in self.staged_skills.list() if str(i["id"]) == parts[1]), None)
+            if not found:
+                return f"No staged entry {parts[1]}."
+            return self._skill_diff(found)
+        def apply(item: dict) -> str:
+            op = item["op"]
+            try:
+                if op["action"] in {"create", "edit"}:
+                    res = "skill saved at " + self.skills.save_skill(op["name"], op["content"])
+                elif op["action"] == "patch":
+                    res = "skill patched at " + self.skills.patch_skill(op["name"], op["old_string"], op["new_string"])
+                else:
+                    res = "skill deleted" if self.skills.delete_skill(op["name"]) else "skill not found"
+                return f"[{item['id']}] OK: {res}"
+            except Exception as err:
+                return f"[{item['id']}] FAILED: {err}"
+        return self._review(self.staged_skills, apply, raw, "skills")
+
+    def _skill_diff(self, item: dict) -> str:
+        op = item["op"]
+        if op["action"] == "patch":
+            return (f"Diff for staged [{item['id']}] {op['action']} '{op['name']}':\n"
+                    f"--- old\n{op['old_string'][:2000]}\n+++ new\n{op['new_string'][:2000]}")
+        if op["action"] in {"create", "edit"}:
+            return (f"Staged [{item['id']}] {op['action']} '{op['name']}' "
+                    f"({len(op['content'])} chars). Approve to apply; full text in "
+                    f"workspace/skills/pending.json.")
+        return f"Staged [{item['id']}] delete '{op['name']}'."
 
     # -- session ops (/new /retry /undo /compress /usage /model) ----------
     def reset(self) -> str:

@@ -54,6 +54,8 @@ Config lives at `~/.owibot/config.json`, workspace at `~/.owibot/workspace`.
   "api_base": "https://openrouter.ai/api/v1",
   "model": "z-ai/glm-4.5-air:free",
   "api_key": "sk-or-v1-YOUR_KEY",
+  "memory": { "write_approval": false },
+  "skills": { "write_approval": false },
   "channels": {
     "telegram": {
       "token": "YOUR_BOT_TOKEN",
@@ -150,7 +152,7 @@ owibot/
 - [x] Inline approval buttons for `exec` / `write_file`
 - [x] Voice memo transcription (OpenAI audio endpoint; honest fallback otherwise)
 - [x] `/bg` background sessions
-- [ ] Memory/skill write-approval staging (`/memory approve`)
+- [x] Memory/skill write-approval staging (`/memory approve`, `/skills diff`)
 - [ ] `systemd` / Task Scheduler service files
 
 ## Credits

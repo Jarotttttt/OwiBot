@@ -61,6 +61,8 @@ class LocalTools:
         self.skills = SkillsLoader(workspace)
         self._memory = None
         self.require_approval = True
+        self.gate_memory_writes = False
+        self.gate_skill_writes = False
         self.safe_binaries = set(SAFE_BINARIES)
         self.pending_ops: dict[str, dict] = {}
         self._pid = 0
@@ -127,18 +129,36 @@ class LocalTools:
             from .memory import MemoryStore
             self._memory = MemoryStore(self.workspace)
         act = (action or "").strip().lower()
+        if act not in {"add", "replace", "remove"}:
+            return "ERROR: action must be add, replace, or remove"
+        if self.gate_memory_writes and not self._context.get("is_cron"):
+            from .staging import StagedStore
+            gist = f"{act} {target}: {(content or old_text or '').strip()[:120]}"
+            nid = StagedStore(self.workspace / "memory" / "pending.json").add(
+                "memory", {"action": act, "target": target, "content": content, "old_text": old_text}, gist)
+            return (f"STAGED (id {nid}): {gist}. It is NOT saved yet — the user reviews "
+                    "staged writes with /memory pending and approves with /memory approve.")
         try:
             if act == "add": return self._memory.add(target, content)
             if act == "replace": return self._memory.replace(target, old_text, content)
-            if act == "remove": return self._memory.remove(target, old_text)
-            return "ERROR: action must be add, replace, or remove"
+            return self._memory.remove(target, old_text)
         except MemoryError as err:
             return f"ERROR: {err}"
 
     def skill_manage(self, action: str, name: str = "", content: str = "", old_string: str = "", new_string: str = "") -> str:
         act = (action or "").strip().lower()
+        if act == "list":
+            idx = self.skills.index_text()
+            return idx or "(no skills installed)"
+        if self.gate_skill_writes and act in {"create", "patch", "edit", "delete"} and not self._context.get("is_cron"):
+            from .staging import StagedStore
+            gist = f"{act} skill '{name}'"
+            nid = StagedStore(self.workspace / "skills" / "pending.json").add(
+                "skill", {"action": act, "name": name, "content": content,
+                          "old_string": old_string, "new_string": new_string}, gist)
+            return (f"STAGED (id {nid}): {gist}. It is NOT applied yet — the user reviews "
+                    "staged writes with /skills pending and approves with /skills approve.")
         try:
-            if act == "list": return self.skills.index_text() or "(no skills installed)"
             if act == "delete": return "OK: skill deleted" if self.skills.delete_skill(name) else "ERROR: skill not found"
             if act == "create": return "OK: skill created at " + self.skills.save_skill(name, content)
             if act == "edit": return "OK: skill rewritten at " + self.skills.save_skill(name, content)
