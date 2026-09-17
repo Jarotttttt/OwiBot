@@ -228,53 +228,6 @@ def build_chat_agent(config: dict, chat_id: str = "default") -> Agent:
         agent.llm.model = saved
     return agent
 
-def cli_resolve(agent: Agent, out: str) -> str:
-    """Resolve approval/clarify markers inline (no buttons in a terminal)."""
-    from ..agent.tools import parse_pending_marker
-    while pid := parse_pending_marker(out):
-        entry = agent.pending.get(pid)
-        if entry is None:
-            break
-        op = entry["op"]
-        trailing = out.split("⟫", 1)[1].strip() if "⟫" in out else ""
-        if op.get("kind") == "clarify":
-            print(f"❓ {op.get('question', '')}")
-            for i, opt in enumerate(op.get("options") or []):
-                print(f"  [{i + 1}] {opt}")
-            try: answer = input("Answer (number or text): ").strip()
-            except EOFError: print(); answer = ""
-            if answer.isdigit() and op.get("options"):
-                try: answer = op["options"][int(answer) - 1]
-                except IndexError: pass
-            out = agent.answer_clarify(pid, answer)
-        else:
-            print(f"🔐 {trailing or 'Approval needed.'}")
-            try: yn = input("Approve? [y/N]: ").strip().lower()
-            except EOFError: print(); yn = ""
-            out = agent.approve(pid) if yn in {"y", "yes"} else agent.deny(pid)
-    return out
-
-
-def cli_ask(agent: Agent, text: str) -> str:
-    return cli_resolve(agent, agent.ask(text))
-
-
-def cli_memory(agent: Agent, text: str) -> str:
-    raw = text[7:].strip()
-    if not raw:
-        st = agent.memory.stats(agent.chat_id)
-        return (f"MEMORY.md: {st['memory']}\nUSER.md: {st['user']}\n"
-                f"History turns: {st['turns']} (~{st['chars']} chars)")
-    return agent.memory_review(raw)
-
-
-def cli_skills(agent: Agent, text: str) -> str:
-    raw = text[7:].strip()
-    if not raw:
-        idx = agent.skills.index_text()
-        return "Installed skills:\n" + idx if idx else "No skills installed yet."
-    return agent.skills_review(raw)
-
 def build_agent() -> Agent:
     interactive = len(sys.argv) == 1 and sys.stdin.isatty() and sys.stdout.isatty()
     return build_agent_from_config(load_config(ensure_global_config(interactive_setup=interactive)))
@@ -330,6 +283,10 @@ def run_setup_command() -> int:
         return run_onboard_command()
     if any(a.startswith("--") for a in sys.argv[2:]):
         from .setup_wizard import run_setup_flags
+        if "--help-flags" in sys.argv[2:]:
+            print("owibot setup [flags]: --api-base URL --api-key KEY --model MODEL\n"
+                  "  --token TOK --allow ID1,ID2 [--mem-gate] [--skills-gate] [--force] --yes")
+            return 0
         try:
             config = run_setup_flags(config, sys.argv[2:])
         except RuntimeError as err:
@@ -361,51 +318,47 @@ def run_service_command(args: list[str]) -> int:
     return 0
 
 def run_doctor_command() -> int:
-    from .theme import dim
-    print("owibot doctor")
-    print(f"  python: {sys.version.split()[0]} ({sys.executable})")
-    print(f"  stdin tty: {sys.stdin.isatty()}  stdout tty: {sys.stdout.isatty()}  "
-          f"encoding: {getattr(sys.stdout, 'encoding', '?')}")
-    try:
-        import prompt_toolkit
-        print(f"  prompt_toolkit: {prompt_toolkit.__version__}")
-    except ImportError:
-        print("  prompt_toolkit: MISSING (pip install prompt_toolkit)")
-    sess = _build_prompt_session()
-    if isinstance(sess, tuple):
-        sess, reason = sess
-    else:
-        reason = ""
-    print(f"  rich prompt: {'OK' if sess else 'OFF — ' + (reason or 'unknown')}")
+    from . import ui
+    print(ui.banner("diagnostics"))
+    print(f"  python   : {sys.version.split()[0]} ({sys.executable})")
+    print(f"  console  : stdin_tty={sys.stdin.isatty()} stdout_tty={sys.stdout.isatty()} "
+          f"encoding={getattr(sys.stdout, 'encoding', '?')}")
     try:
         cfg = load_config(ensure_global_config(interactive_setup=False))
-        print(f"  config: OK (model {cfg.get('model')} @ {cfg.get('api_base')})")
+        print(f"  config   : {ui.green('OK')} - {cfg.get('model')} @ {cfg.get('api_base')}")
+        tg = ((cfg.get("channels") or {}).get("telegram") or {})
+        print(f"  telegram : {'configured' if tg.get('token') else 'not configured'}")
     except RuntimeError as err:
-        print(f"  config: {err}")
+        print(f"  config   : {ui.red(str(err))}")
+    print(f"  service  : {'on' if _service_on() else 'off'} (owibot service install)")
     return 0
 
+
+def _service_on() -> bool:
+    try:
+        from .service import bat_path
+        return bat_path().exists()
+    except Exception:
+        return False
+
 def main() -> None:
-    if "--plain" in sys.argv:
-        sys.argv[:] = [a for a in sys.argv if a != "--plain"]
-        plain_forced = True
-    else:
-        plain_forced = False
     if len(sys.argv) >= 2 and sys.argv[1] == "doctor": run_doctor_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "onboard": run_onboard_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "setup": run_setup_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "gateway": run_gateway_command(); return
     if len(sys.argv) >= 2 and sys.argv[1] == "service": run_service_command(sys.argv[2:]); return
-    try: agent = build_agent()
-    except RuntimeError as err: print(f"Config error: {err}"); print(f"Set api_key in {app_home() / 'config.json'}." ); return
-    if len(sys.argv) > 1: print(cli_ask(agent, " ".join(sys.argv[1:]))); return
-    if plain_forced or not sys.stdout.isatty():
-        run_plain_loop(agent)
-        return
-    try:
-        run_tui_loop(agent)
-    except Exception as err:
-        print(f"TUI unavailable ({err}), falling back to plain mode.")
-        run_plain_loop(agent)
+    print_usage()
+
+
+def print_usage() -> None:
+    from . import ui
+    print(f"{ui.green(ui.uni(chr(0x25c9), '*') + ' owibot')} - Telegram AI agent console")
+    print("  owibot setup               guided setup (provider, model, Telegram)")
+    print("  owibot setup --help-flags  non-interactive flags")
+    print("  owibot gateway             start the Telegram bot")
+    print("  owibot service install     autostart at logon")
+    print("  owibot doctor              diagnose this machine")
+    print(ui.dim("  chatting happens in Telegram - the terminal is only mission control."))
 
 
 def _version() -> str:
@@ -416,218 +369,5 @@ def _version() -> str:
         return "dev"
 
 
-def handle_local(agent: Agent, cmd: str, args: str):
-    """Local slash commands. Returns response text, or None for normal chat."""
-    if cmd in {"help", "?"}: return _cli_help()
-    if cmd == "new": return agent.reset()
-    if cmd == "retry": return cli_resolve(agent, agent.retry())
-    if cmd == "undo": return agent.undo()
-    if cmd == "compress": return agent.compress()
-    if cmd == "usage": return agent.usage()
-    if cmd == "memory": return cli_memory(agent, "/memory" + (f" {args}" if args else ""))
-    if cmd == "skills": return cli_skills(agent, "/skills" + (f" {args}" if args else ""))
-    if cmd == "model": return agent.set_model(args)
-    if cmd == "approve":
-        return agent.approve(args.split()[0]) if args else "Usage: /approve <id>"
-    if cmd == "deny":
-        return agent.deny(args.split()[0]) if args else "Usage: /deny <id>"
-    if cmd == "answer":
-        pid, _, ans = args.partition(" ")
-        return agent.answer_clarify(pid, ans) if pid and ans else "Usage: /answer <id> <text>"
-    return None
-
-
-def pending_card(agent: Agent, out: str) -> str | None:
-    """Render a ⟪PENDING⟫ marker as TUI/plain text. None when no marker."""
-    from owibot.agent.tools import parse_pending_marker
-    pid = parse_pending_marker(out)
-    if not pid:
-        return None
-    trailing = out.split("⟫", 1)[1].strip() if "⟫" in out else ""
-    entry = agent.pending.get(pid)
-    if entry is None:
-        return "That request already expired."
-    op = entry["op"]
-    if op.get("kind") == "clarify":
-        lines = [f"? {op.get('question', '')}  [{pid}]"]
-        for i, opt in enumerate(op.get("options") or [], start=1):
-            lines.append(f"  {i}. {opt}")
-        lines.append(f"Reply: /answer {pid} <number or text>")
-        return "\n".join(lines)
-    return (f"Approval [{pid}]: {trailing or 'confirmation needed'}\n"
-            f"/approve {pid}   or   /deny {pid}")
-
-
-def run_plain_loop(agent: Agent) -> None:
-    from .theme import Spinner, accent, banner, dim, footer, reply_block
-    from .theme import _uni
-    if sys.stdout.isatty(): _clear_screen()
-    st = agent.memory.stats(agent.chat_id)
-    print(banner(_version(), [
-        ("model", agent.llm.model),
-        ("memory", f"{st['memory']} · profile {st['user']}"),
-        ("history", f"{st['turns']} turns"),
-        ("tools", "14 sandboxed"),
-    ]))
-    session = _build_prompt_session()
-    if isinstance(session, tuple):
-        session, reason = session
-        if reason:
-            print(dim(f"rich prompt off ({reason}) — plain input mode"))
-    while True:
-        try:
-            text = _read_line(session)
-        except EOFError: print(); break
-        except KeyboardInterrupt: print(); break
-        if not text: continue
-        if text.lower() in {"exit", "quit"}: break
-        from .tui import parse_local
-        cmd, args = parse_local(text)
-        if cmd == "learn":
-            name, _, material = args.partition("|")
-            if not name.strip() or not material.strip():
-                print("Usage: /learn <name> | <workflow, URL, or 'how I just ...'>"); continue
-            before = agent.session_tool_calls
-            with Spinner():
-                out = cli_ask(agent, Agent.learn_prompt(name.strip(), material.strip()))
-            used = agent.session_tool_calls - before
-            print(reply_block(out))
-            print(footer(used, len(agent.recent) // 2, agent.memory.usage("memory"))); continue
-        if cmd:
-            local = handle_local(agent, cmd, args)
-            if local is None:
-                print(f"unknown command /{cmd} — try /help"); continue
-            card = pending_card(agent, local)
-            print(reply_block(card or local)); continue
-        before = agent.session_tool_calls
-        with Spinner():
-            out = cli_ask(agent, text)
-        used = agent.session_tool_calls - before
-        print(reply_block(out))
-        print(footer(used, len(agent.recent) // 2, agent.memory.usage("memory")))
-
-
-def run_tui_loop(agent: Agent) -> None:
-    from pathlib import Path as _Path
-    from .theme import Spinner
-    from .tui import MessageStore, build_app, parse_local, status_frags, top_frags
-    store = MessageStore()
-    store.add("sys", "OwiBot console — /help for commands, tab switches build/plan, Ctrl+C quits.")
-    busy = {"on": False}
-    mode = {"name": "build"}
-    project = _Path.cwd().name
-
-    def top():
-        _, pct = agent.context_usage()
-        return top_frags(project, agent.llm.model, pct)
-
-    def status():
-        if busy["on"]:
-            return [("class:status", " ● working — one moment… ")]
-        return status_frags()
-
-    while True:
-        try:
-            app = build_app(store, top, status, str(app_home() / "cli_history"),
-                            title=f"{mode['name']} · {agent.llm.model}")
-            text = (app.run() or "").strip()
-        except Exception as err:
-            print(f"TUI unavailable ({err}), falling back to plain mode.")
-            return run_plain_loop(agent)
-        if text in {"/__quit__"} or text.lower() in {"exit", "quit"}:
-            break
-        if text == "/__tab__":
-            mode["name"] = "plan" if mode["name"] == "build" else "build"
-            store.add("sys", f"mode: {mode['name']}" + (" — planning only, writes disabled"
-                                                        if mode["name"] == "plan" else ""))
-            continue
-        if not text:
-            continue
-        cmd, args = parse_local(text)
-        if cmd == "verbose":
-            store.verbose = not store.verbose
-            store.add("sys", f"verbose tool output: {'on' if store.verbose else 'off'}")
-            continue
-        if cmd == "learn":
-            name, _, material = args.partition("|")
-            if not name.strip() or not material.strip():
-                store.add("sys", "Usage: /learn <name> | <workflow, URL, or 'how I just ...'>")
-                continue
-            store.add("user", text)
-            busy["on"] = True
-            try:
-                with Spinner():
-                    out = agent.ask(Agent.learn_prompt(name.strip(), material.strip()),
-                                    {"chat_id": agent.chat_id, "plan": mode["name"] == "plan"})
-            except Exception as err:
-                out = f"Error: {err}"
-            finally:
-                busy["on"] = False
-            card = pending_card(agent, out)
-            store.add("bot", card or out)
-            continue
-        if cmd:
-            local = handle_local(agent, cmd, args)
-            store.add("user", text)
-            if local is None:
-                store.add("sys", f"unknown command /{cmd} — try /help")
-                continue
-            card = pending_card(agent, local)
-            store.add("bot", card or local)
-            continue
-        store.add("user", text)
-        busy["on"] = True
-        try:
-            with Spinner():
-                out = agent.ask(text, {"chat_id": agent.chat_id,
-                                       "plan": mode["name"] == "plan"})
-        except Exception as err:
-            out = f"Error: {err}"
-        finally:
-            busy["on"] = False
-        for entry in agent.last_trace:
-            store.add("tool", entry)
-        card = pending_card(agent, out)
-        store.add("bot", card or out)
-
-
-def _build_prompt_session():
-    """prompt_toolkit session, or (None, reason) when unavailable (plain input)."""
-    if not sys.stdin.isatty():
-        return None, "stdin is not a tty"
-    try:
-        from .prompt import build_session
-    except ImportError as err:
-        return None, f"prompt_toolkit missing: {err}"
-    try:
-        return build_session(app_home() / "cli_history"), ""
-    except Exception as err:
-        return None, f"{type(err).__name__}: {err}"
-
-
-def _read_line(session) -> str:
-    if session is None:
-        from .theme import _uni, accent
-        return input(f"{accent(_uni('➜', '>'))} ").strip()
-    from .prompt import prompt_text
-    return prompt_text(session).strip()
-
-
-def _cli_help() -> str:
-    from .theme import dim, rule
-    rows = [("/new", "fresh session, reload memory snapshot"),
-            ("/retry", "re-run the last message"),
-            ("/undo", "drop the last exchange"),
-            ("/compress", "summarize live context to a file"),
-            ("/usage", "session + memory usage"),
-            ("/memory …", "budgets · pending · approve <id|all> · reject"),
-            ("/skills …", "list · pending · approve · diff <id>"),
-            ("/learn …", "save workflow as skill: /learn name | material"),
-            ("/verbose", "toggle full tool output (TUI)"),
-            ("/model …", "show or switch model"),
-            ("exit", "quit")]
-    lines = ["commands", rule(40)]
-    lines += [f"  {cmd.ljust(12)} {dim(desc)}" for cmd, desc in rows]
-    return "\n".join(lines)
-
+if __name__ == "__main__": main()
 if __name__ == "__main__": main()

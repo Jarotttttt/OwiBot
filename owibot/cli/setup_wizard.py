@@ -41,7 +41,7 @@ def test_chat(api_base: str, api_key: str, model: str) -> str:
     text = str(msg.get("content", "") or "").strip()
     if not text and msg.get("tool_calls") is None and "content" not in msg:
         raise RuntimeError("empty reply and no tool calls")
-    return text or "(model replied with tool calls only — tool-calling works)"
+    return text or "(model replied with tool calls only - tool-calling works)"
 
 
 def check_telegram(token: str) -> str:
@@ -102,121 +102,103 @@ def run_setup_flags(existing: dict, args: list[str]) -> dict:
     return cfg
 
 
-def _ask(prompt: str, default: str = "") -> str:
-    hint = f" [{default}]" if default else ""
-    try:
-        raw = input(f"{prompt}{hint}: ").strip()
-    except EOFError:
-        print()
-        raw = ""
-    return raw or default
-
-
-def _choose(prompt: str, options: list[str]) -> int:
-    print(prompt)
-    for i, opt in enumerate(options, start=1):
-        print(f"  [{i}] {opt}")
-    while True:
-        raw = _ask(f"Select [1-{len(options)}]", "1")
-        if raw.isdigit() and 1 <= int(raw) <= len(options):
-            return int(raw) - 1
-        print("Invalid choice, try again.")
-
-
 def run_wizard(existing: dict) -> dict:
-    """Full interactive setup. Returns the new config dict (not yet saved)."""
+    """Full interactive setup with mission-control styling."""
+    from . import ui
     from .cli import discover_models
     cfg = dict(existing)
-    print("\n=== OwiBot Setup 1/4: LLM provider ===")
-    prov = _choose("Where does the model live?", [
-        "Auto-detect local (Ollama / LM Studio / Codex)",
-        "Custom OpenAI-compatible URL (e.g. http://localhost:20128/v1)",
-        "OpenRouter (https://openrouter.ai/api/v1)",
-        "OpenAI (https://api.openai.com/v1)",
+    print(ui.banner("guided setup"))
+
+    print(ui.steps(1, 4, "Otak - LLM provider"))
+    prov = ui.menu("Modelnya jalan di mana?", [
+        "Auto-detect lokal - Ollama / LM Studio / Codex",
+        "URL OpenAI-compatible custom - mis. http://localhost:20128/v1",
+        "OpenRouter - https://openrouter.ai/api/v1",
+        "OpenAI - https://api.openai.com/v1",
     ])
     if prov == 0:
         found = discover_models()
         if not found:
-            print("No local providers found. Falling back to custom URL.")
-            cfg["api_base"] = _ask("API base URL", str(cfg.get("api_base", "http://127.0.0.1:11434/v1")))
+            print(f"  {ui.yellow('tidak ada provider lokal terdeteksi.')}")
+            cfg["api_base"] = ui.ask("API base URL", str(cfg.get("api_base", "http://127.0.0.1:11434/v1")))
         else:
-            for i, (base, model, name) in enumerate(found[:15], start=1):
-                print(f"  [{i}] {name}: {model} ({base})")
-            raw = _ask(f"Select [1-{min(len(found), 15)}]", "1")
-            idx = int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= min(len(found), 15) else 0
+            print(f"  {ui.green(ui.OK() + f' ketemu {len(found)} model lokal:')}")
+            for i, (base, model, name) in enumerate(found[:10], start=1):
+                print(f"    {ui.green(str(i) + ')')} {ui.bold(model)} {ui.dim(f'{name} · {base}')}")
+            raw = ui.ask("nomor model", "1")
+            idx = int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= min(len(found), 10) else 0
             cfg["api_base"], cfg["model"] = found[idx][:2]
     elif prov == 1:
-        cfg["api_base"] = _ask("API base URL", str(cfg.get("api_base", "http://127.0.0.1:11434/v1")))
+        cfg["api_base"] = ui.ask("API base URL", str(cfg.get("api_base", "http://127.0.0.1:11434/v1")))
     elif prov == 2:
         cfg["api_base"] = "https://openrouter.ai/api/v1"
     else:
         cfg["api_base"] = "https://api.openai.com/v1"
 
-    key_default = str(cfg.get("api_key", ""))
-    if "127.0.0.1" in cfg["api_base"] or "localhost" in cfg["api_base"]:
-        cfg["api_key"] = _ask("API key (Enter = none needed locally)", key_default or "local") or "local"
+    local = "127.0.0.1" in cfg["api_base"] or "localhost" in cfg["api_base"]
+    if local:
+        cfg["api_key"] = ui.ask("API key", str(cfg.get("api_key", "")) or "local") or "local"
     else:
-        try:
-            cfg["api_key"] = getpass.getpass("API key: ").strip() or key_default
-        except (EOFError, KeyboardInterrupt):
-            print()
-            cfg["api_key"] = key_default
+        cfg["api_key"] = ui.ask("API key", str(cfg.get("api_key", "")), secret=True)
         if not cfg["api_key"]:
-            print("WARNING: empty API key — chat test will likely fail.")
+            print(f"  {ui.yellow('key kosong - test chat kemungkinan gagal.')}")
 
     models = probe_models(cfg["api_base"])
     if models:
-        print(f"Found {len(models)} models. First {min(len(models), 12)}:")
-        for i, m in enumerate(models[:12], start=1):
-            print(f"  [{i}] {m}")
-        raw = _ask("Select model number, or type a model id", str(cfg.get("model", models[0])))
-        cfg["model"] = models[int(raw) - 1] if raw.isdigit() and 1 <= int(raw) <= len(models[:12]) else raw
+        print(f"  {ui.green(ui.OK() + f' {len(models)} model tersedia:')}")
+        for i, m in enumerate(models[:10], start=1):
+            mark = ui.green(ui.uni("●", "*")) if m == cfg.get("model") else " "
+            print(f"    {mark} {ui.green(str(i) + ')')} {m}")
+        raw = ui.ask("nomor model, atau ketik id model", str(cfg.get("model", models[0])))
+        cfg["model"] = models[int(raw) - 1] if raw.isdigit() and 1 <= int(raw) <= len(models[:10]) else raw
     else:
-        print("Could not list models from the endpoint.")
-        cfg["model"] = _ask("Model id", str(cfg.get("model", "")))
+        print(f"  {ui.yellow('tidak bisa list model dari endpoint.')}")
+        cfg["model"] = ui.ask("Model id", str(cfg.get("model", "")))
 
-    print("Testing chat completion...")
+    print("  test chat...")
     try:
         reply = test_chat(cfg["api_base"], cfg["api_key"], cfg["model"])
-        print(f"Model replied: {reply[:120]}")
+        print(f"  {ui.green(ui.OK() + ' model menjawab:')} {reply[:120]}")
     except RuntimeError as err:
-        print(f"{err}\nContinuing anyway — you can fix the model later with /model or re-run setup.")
+        print(f"  {ui.yellow(str(err))}\n  lanjut dulu - benerin nanti via setup ulang.")
 
-    print("\n=== OwiBot Setup 2/4: Telegram ===")
-    print("Create a bot via @BotFather (/newbot) if you haven't, then paste the token.")
+    print(ui.steps(2, 4, "Kontrol - Telegram"))
+    print(f"  {ui.dim('bikin bot via @BotFather (/newbot) kalau belum ada.')}")
     while True:
-        token = _ask("Bot token (or 'skip')", "").strip()
+        token = ui.ask("Bot token (atau 'skip')").strip()
         if token.lower() == "skip" or not token:
-            print("Skipping Telegram for now.")
+            print("  Telegram diskip.")
             break
         try:
             who = check_telegram(token)
         except RuntimeError as err:
-            print(err)
+            print(f"  {ui.red(str(err))}")
             continue
-        print(f"Connected as {who}. Now find your numeric ID via @userinfobot.")
-        allow = _ask("Allowed Telegram IDs/usernames, comma-separated (or * )", "")
-        users = parse_allowlist(allow)
+        print(f"  {ui.green(ui.OK() + f' terhubung sebagai {ui.bold(who)}')}")
+        print(f"  {ui.dim('cari ID angkamu via @userinfobot.')}")
+        users = parse_allowlist(ui.ask("ID/username yang boleh pakai, koma-pisah (atau *)"))
         if not users:
-            print("Allowlist is required to enable Telegram.")
+            print(f"  {ui.yellow('allowlist wajib diisi untuk mengaktifkan Telegram.')}")
             continue
         cfg["channels"] = {"telegram": {"token": token, "allow_from": users}}
         break
 
-    print("\n=== OwiBot Setup 3/4: Protection ===")
-    mem_cfg = cfg.get("memory") if isinstance(cfg.get("memory"), dict) else {}
-    skl_cfg = cfg.get("skills") if isinstance(cfg.get("skills"), dict) else {}
-    yn = lambda d: "Y/n" if d else "y/N"
-    mem_gate = _ask("Require approval before agent memory saves? [y/N]").lower() in {"y", "yes"}
-    skl_gate = _ask("Require approval before agent skill writes? [y/N]").lower() in {"y", "yes"}
+    print(ui.steps(3, 4, "Proteksi"))
+    mem_gate = ui.ask("minta persetujuan sebelum agent menyimpan memory? [y/N]").lower() in {"y", "yes"}
+    skl_gate = ui.ask("minta persetujuan sebelum agent menulis skill? [y/N]").lower() in {"y", "yes"}
     cfg["memory"] = {"write_approval": mem_gate}
     cfg["skills"] = {"write_approval": skl_gate}
 
-    print("\n=== OwiBot Setup 4/4: Summary ===")
+    print(ui.steps(4, 4, "Ringkasan"))
     tg = ((cfg.get("channels") or {}).get("telegram") or {})
-    print(f"  model: {cfg.get('model')} @ {cfg.get('api_base')}")
-    print(f"  telegram: {'configured' if tg.get('token') else 'skipped'}")
-    print(f"  gates: memory={mem_gate}, skills={skl_gate}")
-    if _ask("Save this config? [Y/n]").lower() in {"", "y", "yes"}:
+    print(ui.box("siap disimpan", [
+        f"model    : {cfg.get('model')}",
+        f"endpoint : {cfg.get('api_base')}",
+        f"telegram : {'aktif' if tg.get('token') else 'skip'}",
+        f"gate     : memory={'on' if mem_gate else 'off'}, skills={'on' if skl_gate else 'off'}",
+    ]))
+    if ui.ask("simpan config ini? [Y/n]").lower() in {"", "y", "yes"}:
         return cfg
-    raise RuntimeError("Setup cancelled by user.")
+    raise RuntimeError("Setup dibatalkan.")
+
+

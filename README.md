@@ -40,8 +40,11 @@ If you want a bot you fully understand and can shape feature-by-feature — star
 pip install -e .
 owibot setup      # guided wizard: provider → model (tested) → Telegram → protection
 owibot gateway    # start the Telegram bot (Ctrl+C to stop)
-owibot            # CLI chat (same agent, no Telegram needed)
+owibot doctor     # diagnose this machine
 ```
+
+The terminal is mission control only (setup, gateway, service, doctor) —
+chatting happens in Telegram.
 
 Autostart at Windows logon (no admin needed):
 

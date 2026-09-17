@@ -18,7 +18,7 @@ BAT_NAME = "OwiBot-Gateway.bat"
 def _require_windows() -> None:
     if sys.platform != "win32":
         raise RuntimeError("service install is Windows-only. "
-                           "On Linux use systemd, on macOS use launchd — see README.")
+                           "On Linux use systemd, on macOS use launchd - see README.")
 
 
 def owibot_exe() -> str:

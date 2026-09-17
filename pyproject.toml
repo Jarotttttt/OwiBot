@@ -4,13 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "owibot"
-version = "0.5.0"
+version = "0.6.0"
 description = "OwiBot - lightweight personal AI assistant (Telegram controlled)"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
   "python-telegram-bot>=22.0,<23.0",
-  "prompt_toolkit>=3.0",
 ]
 
 [project.scripts]
