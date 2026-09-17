@@ -21,6 +21,15 @@ def is_running(home: Path) -> int | None:
         pid = int(pid_path(home).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
+    if sys.platform == "win32":
+        try:
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                               capture_output=True, text=True, timeout=10)
+            if str(pid) in r.stdout:
+                return pid
+            return None
+        except Exception:
+            return None
     try:
         os.kill(pid, 0)
     except (OSError, ProcessLookupError):
